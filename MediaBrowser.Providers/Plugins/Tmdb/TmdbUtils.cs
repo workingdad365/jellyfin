@@ -125,13 +125,15 @@ namespace MediaBrowser.Providers.Plugins.Tmdb
                 }
             }
 
-            languages.Add("null");
-
-            // Always add English as fallback language
+            // Always add English as fallback language before "null"
             if (!string.Equals(preferredLanguage, "en", StringComparison.OrdinalIgnoreCase))
             {
                 languages.Add("en");
             }
+
+            languages.Add("null");
+
+            Console.WriteLine($"Image languages param list: {string.Join(", ", languages)}");
 
             return string.Join(',', languages);
         }

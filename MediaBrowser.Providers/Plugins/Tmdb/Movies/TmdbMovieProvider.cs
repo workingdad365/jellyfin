@@ -115,6 +115,11 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.Movies
                     .ConfigureAwait(false);
             }
 
+            foreach (var movie in movieResults)
+            {
+                Console.WriteLine($"TMDb Movie Result: Id={movie.Id}, Title={movie.Title}, OriginalTitle={movie.OriginalTitle}, ReleaseDate={movie.ReleaseDate}, Overview={movie.Overview}");
+            }
+
             var len = movieResults.Count;
             var remoteSearchResults = new RemoteSearchResult[len];
             for (var i = 0; i < len; i++)

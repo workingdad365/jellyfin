@@ -42,6 +42,22 @@
             "internalConsoleOptions": "openOnSessionStart"
         },
         {
+            "name": ".NET Launch Release (with WebClient)",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build release",
+            "program": "${workspaceFolder}/Jellyfin.Server/bin/Release/net9.0/jellyfin.dll",
+            "args": ["--webdir", "c:/jellyfin/jellyfin-web/dist"],
+            "cwd": "${workspaceFolder}/Jellyfin.Server",
+            "console": "internalConsole",
+            "stopAtEntry": false,
+            "internalConsoleOptions": "openOnSessionStart",
+            "serverReadyAction": {
+                "action": "openExternally",
+                "pattern": "Overriding address\\(es\\) \\'(https?:\\S+)\\'",
+            }
+        },
+        {
             "name": ".NET Attach",
             "type": "coreclr",
             "request": "attach",

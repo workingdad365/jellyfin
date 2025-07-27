@@ -20,6 +20,22 @@
                 "${workspaceFolder}/tests/Jellyfin.Api.Tests/Jellyfin.Api.Tests.csproj"
             ],
             "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build release",
+            "command": "dotnet",
+            "type": "process",
+            "args": [
+                "build",
+                "${workspaceFolder}/Jellyfin.Server/Jellyfin.Server.csproj",
+                "-c",
+                "Release"
+            ],
+            "problemMatcher": "$msCompile",
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
         }
     ],
     "options": {

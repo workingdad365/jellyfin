@@ -53,6 +53,7 @@ public class DisplayPreferencesController : BaseJellyfinApiController
         [FromQuery, Required] string client)
     {
         userId = RequestHelpers.GetUserId(User, userId);
+        _logger.LogInformation("GetDisplayPreferences: UserId = {UserId}", userId);
 
         if (!Guid.TryParse(displayPreferencesId, out var itemId))
         {
@@ -121,16 +122,17 @@ public class DisplayPreferencesController : BaseJellyfinApiController
         [FromBody, Required] DisplayPreferencesDto displayPreferences)
     {
         userId = RequestHelpers.GetUserId(User, userId);
+        _logger.LogInformation("UpdateDisplayPreferences: UserId = {UserId}", userId);
 
         HomeSectionType[] defaults =
         {
             HomeSectionType.SmallLibraryTiles,
             HomeSectionType.Resume,
-            HomeSectionType.ResumeAudio,
-            HomeSectionType.ResumeBook,
-            HomeSectionType.LiveTv,
-            HomeSectionType.NextUp,
             HomeSectionType.LatestMedia,
+            HomeSectionType.NextUp,
+            HomeSectionType.None,
+            HomeSectionType.None,
+            HomeSectionType.None,
             HomeSectionType.None,
         };
 
@@ -194,9 +196,15 @@ public class DisplayPreferencesController : BaseJellyfinApiController
 
         foreach (var key in displayPreferences.CustomPrefs.Keys.Where(key => key.StartsWith("landing-", StringComparison.OrdinalIgnoreCase)))
         {
-            if (!Enum.TryParse<ViewType>(displayPreferences.CustomPrefs[key], true, out _))
+            var value = displayPreferences.CustomPrefs[key];
+            if (string.IsNullOrEmpty(value))
             {
-                _logger.LogError("Invalid ViewType: {LandingScreenOption}", displayPreferences.CustomPrefs[key]);
+                _logger.LogWarning("Empty ViewType value for key '{Key}', removing from preferences", key);
+                displayPreferences.CustomPrefs.Remove(key);
+            }
+            else if (!Enum.TryParse<ViewType>(value, true, out _))
+            {
+                _logger.LogError("Invalid ViewType for key '{Key}': '{Value}'", key, value);
                 displayPreferences.CustomPrefs.Remove(key);
             }
         }

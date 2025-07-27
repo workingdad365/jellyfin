@@ -22,20 +22,20 @@ namespace MediaBrowser.Model.Users
             EnableContentDeletion = false;
             EnableContentDeletionFromFolders = Array.Empty<string>();
 
-            EnableSyncTranscoding = true;
-            EnableMediaConversion = true;
+            EnableSyncTranscoding = false;
+            EnableMediaConversion = false;
 
             EnableMediaPlayback = true;
-            EnableAudioPlaybackTranscoding = true;
-            EnableVideoPlaybackTranscoding = true;
+            EnableAudioPlaybackTranscoding = false;
+            EnableVideoPlaybackTranscoding = false;
             EnablePlaybackRemuxing = true;
             ForceRemoteSourceTranscoding = false;
-            EnableLiveTvManagement = true;
-            EnableLiveTvAccess = true;
+            EnableLiveTvManagement = false;
+            EnableLiveTvAccess = false;
 
             // Without this on by default, admins won't be able to do this
             // Improve in the future
-            EnableLiveTvManagement = true;
+            EnableLiveTvManagement = false;
 
             EnableSharedDeviceControl = true;
 
@@ -47,9 +47,9 @@ namespace MediaBrowser.Model.Users
 
             AccessSchedules = Array.Empty<AccessSchedule>();
 
-            LoginAttemptsBeforeLockout = -1;
+            LoginAttemptsBeforeLockout = 0;
 
-            MaxActiveSessions = 0;
+            MaxActiveSessions = 3;
             MaxParentalRating = null;
 
             EnableAllChannels = true;

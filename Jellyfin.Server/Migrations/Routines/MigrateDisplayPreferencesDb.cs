@@ -61,10 +61,10 @@ namespace Jellyfin.Server.Migrations.Routines
             {
                 HomeSectionType.SmallLibraryTiles,
                 HomeSectionType.Resume,
-                HomeSectionType.ResumeAudio,
-                HomeSectionType.LiveTv,
-                HomeSectionType.NextUp,
                 HomeSectionType.LatestMedia,
+                HomeSectionType.NextUp,
+                HomeSectionType.None,
+                HomeSectionType.None,
                 HomeSectionType.None,
             };
 

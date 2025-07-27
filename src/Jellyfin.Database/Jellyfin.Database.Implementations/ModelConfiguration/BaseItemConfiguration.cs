@@ -52,6 +52,9 @@ public class BaseItemConfiguration : IEntityTypeConfiguration<BaseItemEntity>
         // latest items
         builder.HasIndex(e => new { e.Type, e.TopParentId, e.IsVirtualItem, e.PresentationUniqueKey, e.DateCreated });
         builder.HasIndex(e => new { e.IsFolder, e.TopParentId, e.IsVirtualItem, e.PresentationUniqueKey, e.DateCreated });
+        // TV Show performance optimization - DateCreated DESC with SortName
+        builder.HasIndex(e => new { e.Type, e.TopParentId, e.IsVirtualItem, e.DateCreated, e.SortName })
+            .HasDatabaseName("IX_BaseItems_TVShow_DateCreated_Performance");
         // resume
         builder.HasIndex(e => new { e.MediaType, e.TopParentId, e.IsVirtualItem, e.PresentationUniqueKey });
 
