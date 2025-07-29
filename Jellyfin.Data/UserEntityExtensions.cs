@@ -177,17 +177,17 @@ public static class UserEntityExtensions
         entity.Permissions.Add(new Permission(PermissionKind.EnableAllFolders, true));
         entity.Permissions.Add(new Permission(PermissionKind.EnableContentDeletion, false));
         entity.Permissions.Add(new Permission(PermissionKind.EnableContentDownloading, true));
-        entity.Permissions.Add(new Permission(PermissionKind.EnableMediaConversion, true));
+        entity.Permissions.Add(new Permission(PermissionKind.EnableMediaConversion, false)); // Changed: Disable by default
         entity.Permissions.Add(new Permission(PermissionKind.EnableMediaPlayback, true));
         entity.Permissions.Add(new Permission(PermissionKind.EnablePlaybackRemuxing, true));
-        entity.Permissions.Add(new Permission(PermissionKind.EnablePublicSharing, true));
+        entity.Permissions.Add(new Permission(PermissionKind.EnablePublicSharing, false)); // Changed: Disable by default
         entity.Permissions.Add(new Permission(PermissionKind.EnableRemoteAccess, true));
-        entity.Permissions.Add(new Permission(PermissionKind.EnableSyncTranscoding, true));
-        entity.Permissions.Add(new Permission(PermissionKind.EnableAudioPlaybackTranscoding, true));
-        entity.Permissions.Add(new Permission(PermissionKind.EnableLiveTvAccess, true));
-        entity.Permissions.Add(new Permission(PermissionKind.EnableLiveTvManagement, true));
+        entity.Permissions.Add(new Permission(PermissionKind.EnableSyncTranscoding, false)); // Changed: Disable by default
+        entity.Permissions.Add(new Permission(PermissionKind.EnableAudioPlaybackTranscoding, false)); // Changed: Disable by default
+        entity.Permissions.Add(new Permission(PermissionKind.EnableLiveTvAccess, false)); // Changed: Disable by default
+        entity.Permissions.Add(new Permission(PermissionKind.EnableLiveTvManagement, false)); // Changed: Disable by default
         entity.Permissions.Add(new Permission(PermissionKind.EnableSharedDeviceControl, true));
-        entity.Permissions.Add(new Permission(PermissionKind.EnableVideoPlaybackTranscoding, true));
+        entity.Permissions.Add(new Permission(PermissionKind.EnableVideoPlaybackTranscoding, false)); // Changed: Disable by default
         entity.Permissions.Add(new Permission(PermissionKind.ForceRemoteSourceTranscoding, false));
         entity.Permissions.Add(new Permission(PermissionKind.EnableRemoteControlOfOtherUsers, false));
         entity.Permissions.Add(new Permission(PermissionKind.EnableCollectionManagement, false));

@@ -346,6 +346,19 @@ namespace Jellyfin.Server
             var factory = services.GetRequiredService<IDbContextFactory<JellyfinDbContext>>();
             var provider = services.GetRequiredService<IJellyfinDatabaseProvider>();
             provider.DbContextFactory = factory;
+
+            // Apply performance optimizations for SQLite database
+            try
+            {
+                _ = provider.OptimizeDatabasePerformance();
+            }
+            catch (Exception ex)
+            {
+                // Log the error but don't fail the startup
+                var loggerFactory = services.GetService<ILoggerFactory>();
+                var logger = loggerFactory?.CreateLogger("Program");
+                logger?.LogWarning(ex, "Failed to apply database performance optimizations during startup");
+            }
         }
     }
 }

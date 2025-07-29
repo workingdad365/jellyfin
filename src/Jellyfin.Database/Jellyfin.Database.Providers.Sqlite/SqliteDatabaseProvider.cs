@@ -64,6 +64,9 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
         {
             if (context.Database.IsSqlite())
             {
+                // Apply performance optimization pragmas first
+                await ApplyPerformancePragmas(context, cancellationToken).ConfigureAwait(false);
+
                 await context.Database.ExecuteSqlRawAsync("PRAGMA optimize", cancellationToken).ConfigureAwait(false);
                 await context.Database.ExecuteSqlRawAsync("VACUUM", cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("jellyfin.db optimized successfully!");
@@ -72,6 +75,65 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
             {
                 _logger.LogInformation("This database doesn't support optimization");
             }
+        }
+    }
+
+    /// <summary>
+    /// Applies performance-optimizing PRAGMA statements to the SQLite database.
+    /// </summary>
+    /// <param name="dbContext">The database context.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    private async Task ApplyPerformancePragmas(JellyfinDbContext dbContext, CancellationToken cancellationToken = default)
+    {
+        if (!dbContext.Database.IsSqlite())
+        {
+            return;
+        }
+
+        var pragmaCommands = new[]
+        {
+            "PRAGMA main.page_size = 4096",
+            "PRAGMA main.cache_size = 20000",
+            "PRAGMA main.locking_mode = EXCLUSIVE",
+            "PRAGMA main.synchronous = NORMAL",
+            "PRAGMA main.temp_store = MEMORY",
+            "PRAGMA mmap_size = 30000000000"
+        };
+
+        foreach (var pragma in pragmaCommands)
+        {
+            try
+            {
+                await dbContext.Database.ExecuteSqlRawAsync(pragma, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to execute PRAGMA command: {Command}", pragma);
+            }
+        }
+
+        _logger.LogInformation("Performance PRAGMA commands applied to jellyfin.db");
+    }
+
+    /// <summary>
+    /// Applies performance-optimizing PRAGMA statements to the SQLite database.
+    /// This method can be called from external code to optimize database performance.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task OptimizeDatabasePerformance(CancellationToken cancellationToken = default)
+    {
+        if (DbContextFactory is null)
+        {
+            _logger.LogWarning("DbContextFactory is null, cannot optimize database performance");
+            return;
+        }
+
+        var context = await DbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
+        {
+            await ApplyPerformancePragmas(context, cancellationToken).ConfigureAwait(false);
         }
     }
 

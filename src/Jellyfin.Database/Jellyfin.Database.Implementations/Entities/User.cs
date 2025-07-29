@@ -53,6 +53,10 @@ namespace Jellyfin.Database.Implementations.Entities
             PlayDefaultAudioTrack = true;
             SubtitleMode = SubtitlePlaybackMode.Default;
             SyncPlayAccess = SyncPlayUserAccessType.CreateAndJoinGroups;
+
+            // Set default policy values
+            MaxActiveSessions = 3;
+            LoginAttemptsBeforeLockout = 3;
         }
 
         /// <summary>

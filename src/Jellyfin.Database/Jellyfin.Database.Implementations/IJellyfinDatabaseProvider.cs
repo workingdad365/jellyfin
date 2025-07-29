@@ -80,4 +80,12 @@ public interface IJellyfinDatabaseProvider
     /// <param name="tableNames">The names of the tables to purge or null for all tables to be purged.</param>
     /// <returns>A Task.</returns>
     Task PurgeDatabase(JellyfinDbContext dbContext, IEnumerable<string>? tableNames);
+
+    /// <summary>
+    /// Applies performance-optimizing settings to the database.
+    /// This method is specifically designed for SQLite database optimization.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
+    Task OptimizeDatabasePerformance(CancellationToken cancellationToken = default);
 }
