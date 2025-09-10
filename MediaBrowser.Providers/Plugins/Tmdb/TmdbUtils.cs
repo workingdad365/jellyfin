@@ -133,7 +133,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb
 
             languages.Add("null");
 
-            Console.WriteLine($"Image languages param list: {string.Join(", ", languages)}");
+            //Console.WriteLine($"Image languages param list: {string.Join(", ", languages)}");
 
             return string.Join(',', languages);
         }

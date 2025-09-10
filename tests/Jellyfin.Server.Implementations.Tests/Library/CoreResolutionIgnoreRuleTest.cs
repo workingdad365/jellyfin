@@ -7,6 +7,7 @@ using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
+using Microsoft.Extensions.Logging;
 using Moq;
 using Xunit;
 
@@ -17,6 +18,7 @@ public class CoreResolutionIgnoreRuleTest
     private readonly CoreResolutionIgnoreRule _rule;
     private readonly NamingOptions _namingOptions;
     private readonly Mock<IServerApplicationPaths> _appPathsMock;
+    private readonly Mock<ILogger<CoreResolutionIgnoreRule>> _loggerMock;
 
     public CoreResolutionIgnoreRuleTest()
     {
@@ -27,7 +29,9 @@ public class CoreResolutionIgnoreRuleTest
         _appPathsMock = new Mock<IServerApplicationPaths>();
         _appPathsMock.SetupGet(x => x.RootFolderPath).Returns("/server/root");
 
-        _rule = new CoreResolutionIgnoreRule(_namingOptions, _appPathsMock.Object);
+        _loggerMock = new Mock<ILogger<CoreResolutionIgnoreRule>>();
+
+        _rule = new CoreResolutionIgnoreRule(_namingOptions, _appPathsMock.Object, _loggerMock.Object);
     }
 
     private FileSystemMetadata MakeFileSystemMetadata(string fullName, bool isDirectory = false)

@@ -6,6 +6,7 @@ using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Resolvers;
 using MediaBrowser.Model.IO;
+using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Library
 {
@@ -16,16 +17,19 @@ namespace Emby.Server.Implementations.Library
     {
         private readonly NamingOptions _namingOptions;
         private readonly IServerApplicationPaths _serverApplicationPaths;
+        private readonly ILogger<CoreResolutionIgnoreRule> _logger;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="CoreResolutionIgnoreRule"/> class.
         /// </summary>
         /// <param name="namingOptions">The naming options.</param>
         /// <param name="serverApplicationPaths">The server application paths.</param>
-        public CoreResolutionIgnoreRule(NamingOptions namingOptions, IServerApplicationPaths serverApplicationPaths)
+        /// <param name="logger">The logger.</param>
+        public CoreResolutionIgnoreRule(NamingOptions namingOptions, IServerApplicationPaths serverApplicationPaths, ILogger<CoreResolutionIgnoreRule> logger)
         {
             _namingOptions = namingOptions;
             _serverApplicationPaths = serverApplicationPaths;
+            _logger = logger;
         }
 
         /// <inheritdoc />
@@ -46,6 +50,14 @@ namespace Emby.Server.Implementations.Library
 
             if (IgnorePatterns.ShouldIgnore(fileInfo.FullName))
             {
+                // Log when #recycle or similar folders are ignored
+                if (fileInfo.FullName.Contains("#recycle", StringComparison.OrdinalIgnoreCase) ||
+                    fileInfo.FullName.Contains("recycle", StringComparison.OrdinalIgnoreCase) ||
+                    fileInfo.FullName.Contains("@Recycle", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation("Ignoring recycle folder: {Path}", fileInfo.FullName);
+                }
+
                 return true;
             }
 

@@ -72,10 +72,31 @@ namespace Emby.Server.Implementations.Library
             "**/@Recycle",
             "**/.@__thumb/**",
             "**/.@__thumb",
+
+            // Windows Recycle Bins and Trash folders
             "**/$RECYCLE.BIN/**",
             "**/$RECYCLE.BIN",
             "**/System Volume Information/**",
             "**/System Volume Information",
+            "**/Recycled/**",
+            "**/Recycled",
+            "**/RECYCLER/**",
+            "**/RECYCLER",
+            "**/.Trash/**",
+            "**/.Trash",
+            "**/Trash/**",
+            "**/Trash",
+
+            // NAS specific recycle folders (case variations)
+            "**/#Recycle/**",
+            "**/#Recycle",
+            "**/#RECYCLE/**",
+            "**/#RECYCLE",
+            "**/recycle/**",
+            "**/recycle",
+            "**/RECYCLE/**",
+            "**/RECYCLE",
+
             "**/.grab/**",
             "**/.grab",
 
@@ -115,10 +136,13 @@ namespace Emby.Server.Implementations.Library
         /// <returns>Whether to ignore the path.</returns>
         public static bool ShouldIgnore(ReadOnlySpan<char> path)
         {
+            // Normalize path separators for consistent pattern matching
+            var normalizedPath = path.ToString().Replace('\\', '/');
+
             int len = _globs.Length;
             for (int i = 0; i < len; i++)
             {
-                if (_globs[i].IsMatch(path))
+                if (_globs[i].IsMatch(normalizedPath))
                 {
                     return true;
                 }
