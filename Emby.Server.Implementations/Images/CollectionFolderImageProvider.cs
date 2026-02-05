@@ -82,6 +82,29 @@ namespace Emby.Server.Implementations.Images
             return item is CollectionFolder;
         }
 
+        /// <summary>
+        /// Forces image refresh if the image is older than 24 hours.
+        /// This ensures library thumbnails are periodically updated with new random content.
+        /// </summary>
+        protected override bool HasChangedByDate(BaseItem item, ItemImageInfo image)
+        {
+            var path = image.Path;
+            if (!string.IsNullOrEmpty(path))
+            {
+                var modificationDate = FileSystem.GetLastWriteTimeUtc(path);
+
+                // Force refresh if image is older than 24 hours
+                if (DateTime.UtcNow - modificationDate > TimeSpan.FromHours(24))
+                {
+                    return true;
+                }
+
+                return image.DateModified != modificationDate;
+            }
+
+            return false;
+        }
+
         protected override string CreateImage(BaseItem item, IReadOnlyCollection<BaseItem> itemsWithImages, string outputPathWithoutExtension, ImageType imageType, int imageIndex)
         {
             var outputPath = Path.ChangeExtension(outputPathWithoutExtension, ".png");
