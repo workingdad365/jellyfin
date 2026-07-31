@@ -208,10 +208,30 @@ namespace Emby.Server.Implementations.IO
         /// Starts the watching path.
         /// </summary>
         /// <param name="path">The path.</param>
-        private void StartWatchingPath(string path)
+        /// <param name="retryCount">How many times starting the watcher has already been retried.</param>
+        private void StartWatchingPath(string path, int retryCount = 0)
         {
             if (!Directory.Exists(path))
             {
+                const int MaxRetries = 10;
+
+                // Network paths (e.g. UNC shares) may not be reachable yet at startup, so retry for a while before giving up.
+                if (retryCount < MaxRetries && !_disposed)
+                {
+                    _logger.LogDebug("Path {Path} not available yet, retrying realtime monitor ({Retry}/{Max}) in 30s", path, retryCount + 1, MaxRetries);
+
+                    Task.Run(async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                        if (!_disposed)
+                        {
+                            StartWatchingPath(path, retryCount + 1);
+                        }
+                    });
+
+                    return;
+                }
+
                 // Seeing a crash in the mono runtime due to an exception being thrown on a different thread
                 _logger.LogInformation("Skipping realtime monitor for {Path} because the path does not exist", path);
                 return;
@@ -313,16 +333,33 @@ namespace Emby.Server.Implementations.IO
         {
             var ex = e.GetException();
             var dw = (FileSystemWatcher)sender;
+            var path = dw.Path;
 
             if (ex is UnauthorizedAccessException unauthorizedAccessException)
             {
-                _logger.LogError(unauthorizedAccessException, "Permission error for Directory watcher: {Path}", dw.Path);
+                _logger.LogError(unauthorizedAccessException, "Permission error for Directory watcher: {Path}", path);
                 return;
             }
 
-            _logger.LogError(ex, "Error in Directory watcher for: {Path}", dw.Path);
+            _logger.LogError(ex, "Error in Directory watcher for: {Path}. Attempting to restart it", path);
 
             DisposeWatcher(dw, true);
+
+            // The watcher is dead after an error (e.g. internal buffer overflow on network shares),
+            // so re-establish it after a short delay to keep monitoring the path.
+            if (_disposed)
+            {
+                return;
+            }
+
+            Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                if (!_disposed)
+                {
+                    StartWatchingPath(path);
+                }
+            });
         }
 
         /// <summary>
