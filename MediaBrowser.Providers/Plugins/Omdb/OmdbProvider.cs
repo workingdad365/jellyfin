@@ -138,6 +138,8 @@ namespace MediaBrowser.Providers.Plugins.Omdb
             }
 
             var item = itemResult.Item;
+            item.IndexNumber = episodeNumber;
+            item.ParentIndexNumber = seasonNumber;
 
             var seasonResult = await GetSeasonRootObject(seriesImdbId, seasonNumber, cancellationToken).ConfigureAwait(false);
 
@@ -411,6 +413,7 @@ namespace MediaBrowser.Providers.Plugins.Omdb
             }
 
             item.Overview = result.Plot;
+            item.OriginalLanguage = result.Language?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
 
             if (!Plugin.Instance.Configuration.CastAndCrew)
             {

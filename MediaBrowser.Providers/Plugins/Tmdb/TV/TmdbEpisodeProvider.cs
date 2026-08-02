@@ -113,7 +113,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
                 List<TvEpisode>? result = null;
                 for (int? episode = startindex; episode <= endindex; episode++)
                 {
-                    var episodeInfo = await _tmdbClientManager.GetEpisodeAsync(seriesTmdbId, seasonNumber, episode.Value, info.SeriesDisplayOrder, info.MetadataLanguage, TmdbUtils.GetImageLanguagesParam(info.MetadataLanguage), cancellationToken).ConfigureAwait(false);
+                    var episodeInfo = await _tmdbClientManager.GetEpisodeAsync(seriesTmdbId, seasonNumber, episode.Value, info.SeriesDisplayOrder, info.MetadataLanguage, TmdbUtils.GetImageLanguagesParam(info.MetadataLanguage, info.MetadataCountryCode), info.MetadataCountryCode, cancellationToken).ConfigureAwait(false);
                     if (episodeInfo is not null)
                     {
                         (result ??= new List<TvEpisode>()).Add(episodeInfo);
@@ -157,7 +157,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
             else
             {
                 episodeResult = await _tmdbClientManager
-                    .GetEpisodeAsync(seriesTmdbId, seasonNumber, episodeNumber.Value, info.SeriesDisplayOrder, info.MetadataLanguage, TmdbUtils.GetImageLanguagesParam(info.MetadataLanguage), cancellationToken)
+                    .GetEpisodeAsync(seriesTmdbId, seasonNumber, episodeNumber.Value, info.SeriesDisplayOrder, info.MetadataLanguage, TmdbUtils.GetImageLanguagesParam(info.MetadataLanguage, info.MetadataCountryCode), info.MetadataCountryCode, cancellationToken)
                     .ConfigureAwait(false);
             }
 
@@ -177,11 +177,13 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
 
             var item = new Episode
             {
-                IndexNumber = info.IndexNumber,
-                ParentIndexNumber = info.ParentIndexNumber,
+                IndexNumber = episodeNumber,
+                ParentIndexNumber = seasonNumber,
                 IndexNumberEnd = info.IndexNumberEnd,
                 Name = episodeResult.Name,
-                PremiereDate = episodeResult.AirDate,
+                PremiereDate = episodeResult.AirDate.HasValue
+                    ? DateTime.SpecifyKind(episodeResult.AirDate.Value, DateTimeKind.Local).ToUniversalTime()
+                    : null,
                 ProductionYear = episodeResult.AirDate?.Year,
                 Overview = episodeResult.Overview,
                 CommunityRating = Convert.ToSingle(episodeResult.VoteAverage)
@@ -275,9 +277,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
                         CrewMember = crewMember,
                         PersonType = TmdbUtils.MapCrewToPersonType(crewMember)
                     })
-                    .Where(entry =>
-                        TmdbUtils.WantedCrewKinds.Contains(entry.PersonType) ||
-                        TmdbUtils.WantedCrewTypes.Contains(entry.CrewMember.Job ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+                    .Where(entry => TmdbUtils.WantedCrewKinds.Contains(entry.PersonType));
 
                 if (config.HideMissingCrewMembers)
                 {

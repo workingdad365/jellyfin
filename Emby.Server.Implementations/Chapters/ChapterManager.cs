@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -8,6 +7,7 @@ using System.Threading.Tasks;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
@@ -129,7 +129,7 @@ public class ChapterManager : IChapterManager
 
         var averageChapterDuration = GetAverageDurationBetweenChapters(chapters);
         var threshold = TimeSpan.FromSeconds(1).Ticks;
-        if (averageChapterDuration < threshold)
+        if (chapters.Count >= 2 && averageChapterDuration < threshold)
         {
             _logger.LogInformation("Skipping chapter image extraction for {Video} as the average chapter duration {AverageDuration} was lower than the minimum threshold {Threshold}", video.Name, averageChapterDuration, threshold);
             extractImages = false;
@@ -224,7 +224,7 @@ public class ChapterManager : IChapterManager
 
         if (saveChapters && changesMade)
         {
-            _chapterRepository.SaveChapters(video.Id, chapters);
+            SaveChapters(video, chapters);
         }
 
         DeleteDeadImages(currentImages, chapters);
@@ -233,9 +233,21 @@ public class ChapterManager : IChapterManager
     }
 
     /// <inheritdoc />
-    public void SaveChapters(Video video, IReadOnlyList<ChapterInfo> chapters)
+    public bool Supports(BaseItem item)
+        => item is Video or Audio;
+
+    /// <inheritdoc />
+    public void SaveChapters(BaseItem item, IReadOnlyList<ChapterInfo> chapters)
     {
-        _chapterRepository.SaveChapters(video.Id, chapters);
+        if (!Supports(item))
+        {
+            _logger.LogWarning("Attempted to save chapters for unsupported item type {Type}: {Name} ({Id})", item.GetType().Name, item.Name, item.Id);
+            return;
+        }
+
+        // Remove any chapters that are outside of the runtime of the item
+        var validChapters = chapters.Where(c => c.StartPositionTicks < item.RunTimeTicks).ToList();
+        _chapterRepository.SaveChapters(item.Id, validChapters);
     }
 
     /// <inheritdoc />
@@ -251,23 +263,9 @@ public class ChapterManager : IChapterManager
     }
 
     /// <inheritdoc />
-    public void DeleteChapterImages(Video video)
+    public async Task DeleteChapterDataAsync(Guid itemId, CancellationToken cancellationToken)
     {
-        var path = _pathManager.GetChapterImageFolderPath(video);
-        try
-        {
-            if (Directory.Exists(path))
-            {
-                _logger.LogInformation("Removing chapter images for {Name} [{Id}]", video.Name, video.Id);
-                Directory.Delete(path, true);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning("Failed to remove chapter image folder for {Item}: {Exception}", video.Id, ex);
-        }
-
-        _chapterRepository.DeleteChapters(video.Id);
+        await _chapterRepository.DeleteChaptersAsync(itemId, cancellationToken).ConfigureAwait(false);
     }
 
     private IReadOnlyList<string> GetSavedChapterImages(Video video, IDirectoryService directoryService)

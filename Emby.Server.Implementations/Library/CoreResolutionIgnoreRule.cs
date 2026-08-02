@@ -41,13 +41,6 @@ namespace Emby.Server.Implementations.Library
                 return false;
             }
 
-            // Don't ignore top level folders
-            if (fileInfo.IsDirectory
-                && (parent is AggregateFolder || (parent?.IsTopParent ?? false)))
-            {
-                return false;
-            }
-
             if (IgnorePatterns.ShouldIgnore(fileInfo.FullName))
             {
                 // Log when #recycle or similar folders are ignored
@@ -59,6 +52,13 @@ namespace Emby.Server.Implementations.Library
                 }
 
                 return true;
+            }
+
+            // Don't ignore top level folders
+            if (fileInfo.IsDirectory
+                && (parent is AggregateFolder || (parent?.IsTopParent ?? false)))
+            {
+                return false;
             }
 
             if (parent is null)

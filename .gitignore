@@ -19,6 +19,7 @@ local.properties
 .classpath
 .settings/
 .loadpath
+*.lscache
 
 # External tool builders
 .externalToolBuilders/
@@ -278,4 +279,9 @@ apiclient/generated
 # Omnisharp crash logs
 mono_crash.*.json
 
+# Devcontainer temp files
+.devcontainer/devcontainer-lock.json
+dotnet/
+
+# Custom
 broken_images.json

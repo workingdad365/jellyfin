@@ -42,18 +42,60 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc/>
     public void Initialise(DbContextOptionsBuilder options, DatabaseConfigurationOptions databaseConfiguration)
     {
-        var sqliteConnectionBuilder = new SqliteConnectionStringBuilder();
-        sqliteConnectionBuilder.DataSource = Path.Combine(_applicationPaths.DataPath, "jellyfin.db");
-        sqliteConnectionBuilder.Cache = Enum.Parse<SqliteCacheMode>(databaseConfiguration.CustomProviderOptions?.Options.FirstOrDefault(e => e.Key.Equals("cache", StringComparison.OrdinalIgnoreCase))?.Value ?? nameof(SqliteCacheMode.Default));
-        sqliteConnectionBuilder.Pooling = (databaseConfiguration.CustomProviderOptions?.Options.FirstOrDefault(e => e.Key.Equals("pooling", StringComparison.OrdinalIgnoreCase))?.Value ?? bool.FalseString).Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase);
+        static T? GetOption<T>(ICollection<CustomDatabaseOption>? options, string key, Func<string, T> converter, Func<T>? defaultValue = null)
+        {
+            if (options is null)
+            {
+                return defaultValue is not null ? defaultValue() : default;
+            }
+
+            var value = options.FirstOrDefault(e => e.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (value is null)
+            {
+                return defaultValue is not null ? defaultValue() : default;
+            }
+
+            return converter(value.Value);
+        }
+
+        var customOptions = databaseConfiguration.CustomProviderOptions?.Options;
+
+        var sqliteConnectionBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = GetOption(customOptions, "path", e => e, () => Path.Combine(_applicationPaths.DataPath, "jellyfin.db")),
+            Cache = GetOption(customOptions, "cache", Enum.Parse<SqliteCacheMode>, () => SqliteCacheMode.Default),
+            Pooling = GetOption(customOptions, "pooling", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => true),
+            DefaultTimeout = GetOption(customOptions, "command-timeout", int.Parse, () => 60)
+        };
+
+        var connectionString = sqliteConnectionBuilder.ToString();
+
+        // Log SQLite connection parameters
+        _logger.LogInformation("SQLite connection string: {ConnectionString}", connectionString);
 
         options
             .UseSqlite(
-                sqliteConnectionBuilder.ToString(),
+                connectionString,
                 sqLiteOptions => sqLiteOptions.MigrationsAssembly(GetType().Assembly))
             // TODO: Remove when https://github.com/dotnet/efcore/pull/35873 is merged & released
             .ConfigureWarnings(warnings =>
-                warnings.Ignore(RelationalEventId.NonTransactionalMigrationOperationWarning));
+                warnings.Ignore(RelationalEventId.NonTransactionalMigrationOperationWarning)
+                    .Ignore(RelationalEventId.MultipleCollectionIncludeWarning))
+            .AddInterceptors(new PragmaConnectionInterceptor(
+                _logger,
+                GetOption<int?>(customOptions, "cacheSize", e => int.Parse(e, CultureInfo.InvariantCulture)),
+                GetOption(customOptions, "lockingmode", e => e, () => "NORMAL")!,
+                GetOption(customOptions, "journalsizelimit", int.Parse, () => 134_217_728),
+                GetOption(customOptions, "tempstoremode", int.Parse, () => 2),
+                GetOption(customOptions, "syncmode", int.Parse, () => 1),
+                customOptions?.Where(e => e.Key.StartsWith("#PRAGMA:", StringComparison.OrdinalIgnoreCase)).ToDictionary(e => e.Key["#PRAGMA:".Length..], e => e.Value) ?? []));
+
+        var enableSensitiveDataLogging = GetOption(customOptions, "EnableSensitiveDataLogging", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
+        if (enableSensitiveDataLogging)
+        {
+            options.EnableSensitiveDataLogging(enableSensitiveDataLogging);
+            _logger.LogInformation("EnableSensitiveDataLogging is enabled on SQLite connection");
+        }
     }
 
     /// <inheritdoc/>
@@ -62,19 +104,14 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
         var context = await DbContextFactory!.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using (context.ConfigureAwait(false))
         {
-            if (context.Database.IsSqlite())
-            {
-                // Apply performance optimization pragmas first
-                await ApplyPerformancePragmas(context, cancellationToken).ConfigureAwait(false);
+            // Apply performance optimization pragmas first
+            await ApplyPerformancePragmas(context, cancellationToken).ConfigureAwait(false);
 
-                await context.Database.ExecuteSqlRawAsync("PRAGMA optimize", cancellationToken).ConfigureAwait(false);
-                await context.Database.ExecuteSqlRawAsync("VACUUM", cancellationToken).ConfigureAwait(false);
-                _logger.LogInformation("jellyfin.db optimized successfully!");
-            }
-            else
-            {
-                _logger.LogInformation("This database doesn't support optimization");
-            }
+            await context.Database.ExecuteSqlRawAsync("PRAGMA wal_checkpoint(TRUNCATE)", cancellationToken).ConfigureAwait(false);
+            await context.Database.ExecuteSqlRawAsync("PRAGMA optimize", cancellationToken).ConfigureAwait(false);
+            await context.Database.ExecuteSqlRawAsync("VACUUM", cancellationToken).ConfigureAwait(false);
+            await context.Database.ExecuteSqlRawAsync("PRAGMA wal_checkpoint(TRUNCATE)", cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("jellyfin.db optimized successfully!");
         }
     }
 
@@ -183,7 +220,7 @@ public sealed class SqliteDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc />
     public Task RestoreBackupFast(string key, CancellationToken cancellationToken)
     {
-        // ensure there are absolutly no dangling Sqlite connections.
+        // ensure there are absolutely no dangling Sqlite connections.
         SqliteConnection.ClearAllPools();
         var path = Path.Combine(_applicationPaths.DataPath, "jellyfin.db");
         var backupFile = Path.Combine(_applicationPaths.DataPath, BackupFolderName, $"{key}_jellyfin.db");
