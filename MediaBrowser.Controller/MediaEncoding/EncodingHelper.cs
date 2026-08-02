@@ -3066,6 +3066,19 @@ namespace MediaBrowser.Controller.MediaEncoding
                 }
 
                 seekParam += string.Format(CultureInfo.InvariantCulture, "-ss {0}", _mediaEncoder.GetTimeParameter(seekTick));
+
+                // 리먹싱 시 세그먼트는 키프레임에서 시작하는데, accurate seek(ffmpeg 기본값)를 그대로 두면
+                // 서버가 플레이리스트에 적는 세그먼트 시작 시각과 실제 타임스탬프가 어긋나 자막 싱크가 밀린다.
+                // 바로 위의 0.5초 오프셋은 원래 이 옵션과 한 쌍으로 동작하던 보정이다.
+                // upstream 이 HLS seek 리팩터링(#15926, #16580)에서 이 옵션을 제거했으나,
+                // 그 대체 수단(HlsAudioSeekStrategy, noise bsf 트림)은 비디오를 트랜스코딩하는 경우만 다루므로
+                // 비디오까지 stream copy 하는 완전 리먹싱 경로에는 보정이 남아있지 않아 직접 복원한다.
+                // wtv 는 이 옵션을 쓰면 seeking 이 깨지므로 제외한다.
+                if (isHlsRemuxing
+                    && !string.Equals(state.InputContainer, "wtv", StringComparison.OrdinalIgnoreCase))
+                {
+                    seekParam += " -noaccurate_seek";
+                }
             }
 
             return seekParam;

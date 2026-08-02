@@ -1727,6 +1727,17 @@ public class DynamicHlsController : BaseJellyfinApiController
             var videoCodec = _encodingHelper.GetVideoEncoder(state, _encodingOptions);
             var copyArgs = "-codec:a:0 copy" + bitStreamArgs + strictArgs;
 
+            // 비디오까지 stream copy 하는 완전 리먹싱에서는 시크 시 비디오가 이전 키프레임부터 시작하는데,
+            // 오디오는 디코더를 거치지 않아 시크 지점 이전 패킷까지 그대로 실려 나간다.
+            // 그 결과 A/V 가 어긋나고 재생 위치가 밀려 자막 싱크까지 틀어진다.
+            // -copypriorss 0 은 시작 시각 이전의 복사 패킷을 버려 비디오와 정렬시킨다(재인코딩 없음).
+            // upstream 이 이 옵션을 제거하고 도입한 대체 수단(GetCopiedAudioTrimBsf 의 noise bsf,
+            // HlsAudioSeekStrategy)은 비디오를 트랜스코딩하는 경우만 다루므로 이 경로에는 보정이 없다.
+            if (EncodingHelper.IsCopyCodec(videoCodec) && !state.IsSegmentedLiveStream)
+            {
+                return copyArgs + " -copypriorss:a:0 0";
+            }
+
             return copyArgs;
         }
 
