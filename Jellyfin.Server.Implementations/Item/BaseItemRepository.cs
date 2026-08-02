@@ -77,6 +77,27 @@ public sealed class BaseItemRepository
     private static readonly IReadOnlyList<ItemValueType> _getGenreValueTypes = [ItemValueType.Genre];
 
     /// <summary>
+    /// Item kinds that must always belong to a library folder.
+    /// ItemByName kinds (Person, Studio, Genre, ...) and system folders legitimately have no parent, so they are excluded.
+    /// </summary>
+    private static readonly IReadOnlyList<BaseItemKind> _orphanCandidateKinds =
+    [
+        BaseItemKind.Movie,
+        BaseItemKind.Series,
+        BaseItemKind.Season,
+        BaseItemKind.Episode,
+        BaseItemKind.Video,
+        BaseItemKind.Trailer,
+        BaseItemKind.MusicVideo,
+        BaseItemKind.MusicAlbum,
+        BaseItemKind.Audio,
+        BaseItemKind.AudioBook,
+        BaseItemKind.Book,
+        BaseItemKind.Photo,
+        BaseItemKind.PhotoAlbum
+    ];
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="BaseItemRepository"/> class.
     /// </summary>
     /// <param name="dbProvider">The db factory.</param>
@@ -2177,8 +2198,14 @@ public sealed class BaseItemRepository
 
         if (filter.HasDeadParentId.HasValue && filter.HasDeadParentId.Value)
         {
+            // ParentId 가 NULL 이면 라이브러리 트리에서 완전히 분리되어 UI 로는 조회도 삭제도 불가능하므로 함께 정리 대상으로 잡는다
+            var orphanTypeNames = _orphanCandidateKinds
+                .Select(e => _itemTypeLookup.BaseItemKindNames[e])
+                .ToArray();
+
             baseQuery = baseQuery
-                .Where(e => e.ParentId.HasValue && !context.BaseItems.Where(e => e.Id != EF.Constant(PlaceholderId)).Any(f => f.Id == e.ParentId.Value));
+                .Where(e => (e.ParentId.HasValue && !context.BaseItems.Where(e => e.Id != EF.Constant(PlaceholderId)).Any(f => f.Id == e.ParentId.Value))
+                    || (!e.ParentId.HasValue && orphanTypeNames.Contains(e.Type)));
         }
 
         if (filter.IsDeadArtist.HasValue && filter.IsDeadArtist.Value)

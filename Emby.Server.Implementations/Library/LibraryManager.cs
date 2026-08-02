@@ -1985,10 +1985,63 @@ namespace Emby.Server.Implementations.Library
             return image.Path is not null && !image.IsLocalFile;
         }
 
+        /// <summary>
+        /// Removes image records whose backing file no longer exists.
+        /// </summary>
+        /// <remarks>
+        /// Stale records make <see cref="BaseItem.HasImage(ImageType, int)"/> report true, so a normal
+        /// "search for missing metadata" refresh skips re-downloading and the item stays permanently image-less.
+        /// </remarks>
+        /// <param name="item">The item to clean up.</param>
+        /// <returns><c>true</c> if any record was removed; otherwise <c>false</c>.</returns>
+        private bool RemoveMissingLocalImages(BaseItem item)
+        {
+            List<ItemImageInfo>? missingImages = null;
+            var internalMetadataPath = _configurationManager.ApplicationPaths.InternalMetadataPath;
+
+            foreach (var image in item.ImageInfos)
+            {
+                if (!image.IsLocalFile || image.Path is null || File.Exists(image.Path))
+                {
+                    continue;
+                }
+
+                // 미디어 폴더가 UNC/이동식일 경우 일시적 접근 불가를 파일 삭제로 오판할 수 있어, 내부 메타데이터 경로가 아니면 상위 디렉터리 존재를 함께 확인한다
+                if (!image.Path.StartsWith(internalMetadataPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    var directory = Path.GetDirectoryName(image.Path);
+                    if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+                    {
+                        continue;
+                    }
+                }
+
+                (missingImages ??= []).Add(image);
+            }
+
+            if (missingImages is null)
+            {
+                return false;
+            }
+
+            _logger.LogInformation(
+                "Removing {Count} image record(s) with missing files for {Name} [{Id}]: {Paths}",
+                missingImages.Count,
+                item.Name ?? "Unknown name",
+                item.Id,
+                string.Join(", ", missingImages.Select(i => i.Path)));
+
+            item.RemoveImages(missingImages);
+
+            return true;
+        }
+
         /// <inheritdoc />
         public async Task UpdateImagesAsync(BaseItem item, bool forceUpdate = false)
         {
             ArgumentNullException.ThrowIfNull(item);
+
+            var removedMissingImages = item.SourceType == SourceType.Library && RemoveMissingLocalImages(item);
 
             var outdated = forceUpdate
                 ? item.ImageInfos.Where(i => i.Path is not null).ToArray()
@@ -1996,6 +2049,11 @@ namespace Emby.Server.Implementations.Library
             // Skip image processing if current or live tv source
             if (outdated.Length == 0 || item.SourceType != SourceType.Library)
             {
+                if (removedMissingImages)
+                {
+                    _itemRepository.SaveImages(item);
+                }
+
                 RegisterItem(item);
                 return;
             }
