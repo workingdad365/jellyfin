@@ -435,6 +435,36 @@ namespace MediaBrowser.Providers.Plugins.Tmdb
         }
 
         /// <summary>
+        /// 관리자 별칭 화면에서 사용할 한국어 인물 검색 페이지를 조회한다.
+        /// </summary>
+        /// <param name="name">검색할 인물명.</param>
+        /// <param name="page">1부터 시작하는 페이지 번호.</param>
+        /// <param name="cancellationToken">요청 취소 토큰.</param>
+        /// <returns>검색 결과와 전체 페이지 수.</returns>
+        public async Task<SearchContainer<SearchPerson>?> SearchPersonPageAsync(string name, int page, CancellationToken cancellationToken)
+        {
+            var key = $"person-alias-search-{name}-{page}-ko-KR";
+            if (_memoryCache.TryGetValue(key, out SearchContainer<SearchPerson>? cached) && cached is not null)
+            {
+                return cached;
+            }
+
+            await EnsureClientConfigAsync().ConfigureAwait(false);
+            var result = await _tmDbClient.SearchPersonAsync(
+                name,
+                language: "ko-KR",
+                page: page,
+                includeAdult: Plugin.Instance.Configuration.IncludeAdult,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (result is not null)
+            {
+                CacheSearch(key, result);
+            }
+
+            return result;
+        }
+
+        /// <summary>
         /// Searches for a movie based on its name using the TMDb API.
         /// </summary>
         /// <param name="name">The name of the movie.</param>

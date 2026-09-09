@@ -515,6 +515,8 @@ namespace Emby.Server.Implementations
             serviceCollection.AddScoped<ISystemManager, SystemManager>();
 
             serviceCollection.AddSingleton<TmdbClientManager>();
+            serviceCollection.AddSingleton<ITmdbPersonAliasService, TmdbPersonAliasService>();
+            serviceCollection.AddSingleton<ITmdbPersonSearchService, MediaBrowser.Providers.Plugins.Tmdb.People.TmdbPersonSearchService>();
             serviceCollection.AddSingleton<TmdbMovieSimilarProvider>();
             serviceCollection.AddSingleton<TmdbSeriesSimilarProvider>();
 

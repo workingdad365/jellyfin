@@ -28,6 +28,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.Movies
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILibraryManager _libraryManager;
         private readonly TmdbClientManager _tmdbClientManager;
+        private readonly ITmdbPersonAliasService _personAliases;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="TmdbMovieProvider"/> class.
@@ -35,14 +36,17 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.Movies
         /// <param name="libraryManager">The <see cref="ILibraryManager"/>.</param>
         /// <param name="httpClientFactory">The <see cref="IHttpClientFactory"/>.</param>
         /// <param name="tmdbClientManager">The <see cref="TmdbClientManager"/>.</param>
+        /// <param name="personAliases">TMDB 인물 별칭 저장소.</param>
         public TmdbMovieProvider(
             ILibraryManager libraryManager,
             TmdbClientManager tmdbClientManager,
-            IHttpClientFactory httpClientFactory)
+            IHttpClientFactory httpClientFactory,
+            ITmdbPersonAliasService personAliases)
         {
             _libraryManager = libraryManager;
             _tmdbClientManager = tmdbClientManager;
             _httpClientFactory = httpClientFactory;
+            _personAliases = personAliases;
         }
 
         /// <inheritdoc />
@@ -278,6 +282,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.Movies
                 }
             }
 
+            var personAliases = _personAliases.GetAliases();
             if (movieResult.Credits?.Cast is not null)
             {
                 var castQuery = movieResult.Credits.Cast.AsEnumerable();
@@ -298,7 +303,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.Movies
 
                     var personInfo = new PersonInfo
                     {
-                        Name = actor.Name.Trim(),
+                        Name = _personAliases.ResolveName(personAliases, actor.Id, actor.Name),
                         Role = actor.Character?.Trim() ?? string.Empty,
                         Type = PersonKind.Actor,
                         SortOrder = actor.Order
@@ -346,7 +351,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.Movies
 
                     var personInfo = new PersonInfo
                     {
-                        Name = crewMember.Name.Trim(),
+                        Name = _personAliases.ResolveName(personAliases, crewMember.Id, crewMember.Name),
                         Role = crewMember.Job?.Trim() ?? string.Empty,
                         Type = entry.PersonType
                     };

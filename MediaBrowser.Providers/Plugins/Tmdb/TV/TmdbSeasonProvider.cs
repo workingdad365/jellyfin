@@ -22,16 +22,19 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
     {
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly TmdbClientManager _tmdbClientManager;
+        private readonly ITmdbPersonAliasService _personAliases;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="TmdbSeasonProvider"/> class.
         /// </summary>
         /// <param name="httpClientFactory">The <see cref="IHttpClientFactory"/>.</param>
         /// <param name="tmdbClientManager">The <see cref="TmdbClientManager"/>.</param>
-        public TmdbSeasonProvider(IHttpClientFactory httpClientFactory, TmdbClientManager tmdbClientManager)
+        /// <param name="personAliases">TMDB 인물 별칭 저장소.</param>
+        public TmdbSeasonProvider(IHttpClientFactory httpClientFactory, TmdbClientManager tmdbClientManager, ITmdbPersonAliasService personAliases)
         {
             _httpClientFactory = httpClientFactory;
             _tmdbClientManager = tmdbClientManager;
+            _personAliases = personAliases;
         }
 
         /// <inheritdoc />
@@ -82,6 +85,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
             result.Item.TrySetProviderId(MetadataProvider.Tvdb, seasonResult.ExternalIds?.TvdbId);
 
             var credits = seasonResult.Credits;
+            var personAliases = _personAliases.GetAliases();
             if (credits?.Cast is not null)
             {
                 var castQuery = config.HideMissingCastMembers
@@ -97,7 +101,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
 
                     var personInfo = new PersonInfo
                     {
-                        Name = actor.Name.Trim(),
+                        Name = _personAliases.ResolveName(personAliases, actor.Id, actor.Name),
                         Role = actor.Character?.Trim() ?? string.Empty,
                         Type = PersonKind.Actor,
                         SortOrder = actor.Order,
@@ -139,7 +143,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
 
                     var personInfo = new PersonInfo
                     {
-                        Name = crewMember.Name.Trim(),
+                        Name = _personAliases.ResolveName(personAliases, crewMember.Id, crewMember.Name),
                         Role = crewMember.Job?.Trim() ?? string.Empty,
                         Type = entry.PersonType,
                         ImageUrl = _tmdbClientManager.GetProfileUrl(crewMember.ProfilePath)

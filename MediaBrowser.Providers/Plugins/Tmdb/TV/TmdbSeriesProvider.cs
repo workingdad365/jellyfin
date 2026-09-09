@@ -28,6 +28,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly ILibraryManager _libraryManager;
         private readonly TmdbClientManager _tmdbClientManager;
+        private readonly ITmdbPersonAliasService _personAliases;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="TmdbSeriesProvider"/> class.
@@ -35,14 +36,17 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
         /// <param name="libraryManager">The <see cref="ILibraryManager"/>.</param>
         /// <param name="httpClientFactory">The <see cref="IHttpClientFactory"/>.</param>
         /// <param name="tmdbClientManager">The <see cref="TmdbClientManager"/>.</param>
+        /// <param name="personAliases">TMDB 인물 별칭 저장소.</param>
         public TmdbSeriesProvider(
             ILibraryManager libraryManager,
             IHttpClientFactory httpClientFactory,
-            TmdbClientManager tmdbClientManager)
+            TmdbClientManager tmdbClientManager,
+            ITmdbPersonAliasService personAliases)
         {
             _libraryManager = libraryManager;
             _httpClientFactory = httpClientFactory;
             _tmdbClientManager = tmdbClientManager;
+            _personAliases = personAliases;
         }
 
         /// <inheritdoc />
@@ -235,8 +239,11 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
                 ResultLanguage = info.MetadataLanguage ?? tvShow.OriginalLanguage
             };
 
+            var personAliases = _personAliases.GetAliases();
             foreach (var person in GetPersons(tvShow))
             {
+                person.TryGetTmdbId(out var personTmdbId);
+                person.Name = _personAliases.ResolveName(personAliases, personTmdbId, person.Name);
                 result.AddPerson(person);
             }
 
