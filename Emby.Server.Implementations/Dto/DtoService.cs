@@ -185,6 +185,13 @@ namespace Emby.Server.Implementations.Dto
                 allCollectionFolders = _libraryManager.GetUserRootFolder().Children.OfType<Folder>().ToList();
             }
 
+            // Batch-fetch by-name item counts to avoid N+1 queries
+            Dictionary<Guid, ItemCounts>? itemCountsBatch = null;
+            if (options.ContainsField(ItemFields.ItemCounts))
+            {
+                itemCountsBatch = GetItemCountsBatch(accessibleItems, user);
+            }
+
             // Batch-fetch child counts for all folders to avoid N+1 queries
             Dictionary<Guid, int>? childCountBatch = null;
             if (options.ContainsField(ItemFields.ChildCount))
@@ -192,7 +199,7 @@ namespace Emby.Server.Implementations.Dto
                 var folderIds = accessibleItems.OfType<Folder>().Select(f => f.Id).ToList();
                 if (folderIds.Count > 0)
                 {
-                    childCountBatch = _libraryManager.GetChildCountBatch(folderIds, user?.Id);
+                    childCountBatch = _libraryManager.GetChildCountBatch(folderIds, user);
                 }
             }
 
@@ -242,6 +249,29 @@ namespace Emby.Server.Implementations.Dto
                 artistsBatch = _libraryManager.GetArtists(artistNames.ToArray());
             }
 
+            // Batch-fetch people across all items to avoid one GetPeople query per item.
+            IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>>? peopleBatch = null;
+            if (options.ContainsField(ItemFields.People))
+            {
+                var peopleItemIds = accessibleItems.Where(i => i.SupportsPeople).Select(i => i.Id).ToList();
+                if (peopleItemIds.Count > 0)
+                {
+                    peopleBatch = _libraryManager.GetPeopleByItems(peopleItemIds);
+                }
+            }
+
+            // Batch-detect which videos own alternate versions to avoid the per-item alternate-version
+            // queries in MediaSourceCount. Videos absent from this set have a single media source.
+            IReadOnlySet<Guid>? alternateVersionItemIds = null;
+            if (options.ContainsField(ItemFields.MediaSourceCount))
+            {
+                var versionItemIds = accessibleItems.OfType<Video>().Select(i => i.Id).ToList();
+                if (versionItemIds.Count > 0)
+                {
+                    alternateVersionItemIds = _libraryManager.GetItemIdsWithAlternateVersions(versionItemIds);
+                }
+            }
+
             for (int index = 0; index < accessibleItems.Count; index++)
             {
                 var item = accessibleItems[index];
@@ -255,7 +285,9 @@ namespace Emby.Server.Implementations.Dto
                     childCountBatch,
                     playedCountBatch,
                     artistsBatch,
-                    resumeDataBatch?.GetValueOrDefault(item.Id));
+                    resumeDataBatch?.GetValueOrDefault(item.Id),
+                    peopleBatch,
+                    alternateVersionItemIds);
 
                 if (item is LiveTvChannel tvChannel)
                 {
@@ -268,7 +300,7 @@ namespace Emby.Server.Implementations.Dto
 
                 if (options.ContainsField(ItemFields.ItemCounts))
                 {
-                    SetItemByNameInfo(dto, user);
+                    SetItemByNameInfo(dto, user, itemCountsBatch);
                 }
 
                 returnItems[index] = dto;
@@ -317,7 +349,9 @@ namespace Emby.Server.Implementations.Dto
             Dictionary<Guid, int>? childCountBatch = null,
             Dictionary<Guid, (int Played, int Total)>? playedCountBatch = null,
             IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null,
-            VersionResumeData? resumeData = null)
+            VersionResumeData? resumeData = null,
+            IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>>? peopleBatch = null,
+            IReadOnlySet<Guid>? alternateVersionItemIds = null)
         {
             var dto = new BaseItemDto
             {
@@ -331,7 +365,15 @@ namespace Emby.Server.Implementations.Dto
 
             if (options.ContainsField(ItemFields.People))
             {
-                AttachPeople(dto, item, user);
+                IReadOnlyList<PersonInfo>? prefetchedPeople = null;
+                if (peopleBatch is not null)
+                {
+                    // The batch omits items with no people, so a miss means "no people",
+                    // not "not fetched". Use an empty list to skip the per-item query.
+                    prefetchedPeople = peopleBatch.GetValueOrDefault(item.Id) ?? [];
+                }
+
+                AttachPeople(dto, item, user, prefetchedPeople);
             }
 
             if (options.ContainsField(ItemFields.PrimaryImageAspectRatio))
@@ -378,7 +420,7 @@ namespace Emby.Server.Implementations.Dto
                 AttachStudios(dto, item);
             }
 
-            AttachBasicFields(dto, item, owner, options, artistsBatch, user);
+            AttachBasicFields(dto, item, owner, options, artistsBatch, user, alternateVersionItemIds);
 
             if (options.ContainsField(ItemFields.CanDelete))
             {
@@ -483,14 +525,36 @@ namespace Emby.Server.Implementations.Dto
             return dto;
         }
 
-        private void SetItemByNameInfo(BaseItemDto dto, User? user)
+        private Dictionary<Guid, ItemCounts> GetItemCountsBatch(IReadOnlyList<BaseItem> items, User? user)
+        {
+            var result = new Dictionary<Guid, ItemCounts>();
+
+            foreach (var group in items.GroupBy(item => item.GetBaseItemKind()))
+            {
+                if (!_relatedItemKinds.TryGetValue(group.Key, out var relatedItemKinds))
+                {
+                    continue;
+                }
+
+                var ids = group.Select(item => item.Id).ToArray();
+                foreach (var (id, counts) in _libraryManager.GetItemCountsForNameItems(group.Key, ids, relatedItemKinds, user))
+                {
+                    result[id] = counts;
+                }
+            }
+
+            return result;
+        }
+
+        private void SetItemByNameInfo(BaseItemDto dto, User? user, IReadOnlyDictionary<Guid, ItemCounts>? prefetchedCounts = null)
         {
             if (!_relatedItemKinds.TryGetValue(dto.Type, out var relatedItemKinds))
             {
                 return;
             }
 
-            var counts = _libraryManager.GetItemCountsForNameItem(dto.Type, dto.Id, relatedItemKinds, user);
+            var counts = prefetchedCounts?.GetValueOrDefault(dto.Id)
+                ?? _libraryManager.GetItemCountsForNameItem(dto.Type, dto.Id, relatedItemKinds, user);
 
             dto.AlbumCount = counts.AlbumCount;
             dto.ArtistCount = counts.ArtistCount;
@@ -576,7 +640,11 @@ namespace Emby.Server.Implementations.Dto
                     // For these types we can try to optimize and assume these values will be equal
                     if (item is MusicAlbum || item is Season || item is Playlist)
                     {
-                        dto.ChildCount = dto.RecursiveItemCount;
+                        if (dto.RecursiveItemCount > 0)
+                        {
+                            dto.ChildCount = dto.RecursiveItemCount;
+                        }
+
                         var folderChildCount = folder.LinkedChildren.Length;
                         // The default is an empty array, so we can't reliably use the count when it's empty
                         if (folderChildCount > 0)
@@ -661,7 +729,8 @@ namespace Emby.Server.Implementations.Dto
                 return count;
             }
 
-            // Fall back to individual query for special cases (Series, Season, etc.)
+            // Only reached when no batch was computed: the batch holds an entry for every folder it
+            // was asked about, zero included.
             return folder.GetChildCount(user);
         }
 
@@ -742,12 +811,18 @@ namespace Emby.Server.Implementations.Dto
         /// <param name="dto">The dto.</param>
         /// <param name="item">The item.</param>
         /// <param name="user">The requesting user.</param>
-        private void AttachPeople(BaseItemDto dto, BaseItem item, User? user = null)
+        /// <param name="prefetchedPeople">People fetched in batch by the caller; when null the people are queried per item.</param>
+        private void AttachPeople(BaseItemDto dto, BaseItem item, User? user = null, IReadOnlyList<PersonInfo>? prefetchedPeople = null)
         {
+            // When rendering a page of items the caller batch-fetches people for every item up
+            // front and passes them in, avoiding one GetPeople query per item. Fall back to the
+            // per-item query for the single item path where no batch is available.
+            var source = prefetchedPeople ?? _libraryManager.GetPeople(item);
+
             // Ordering by person type to ensure actors and artists are at the front.
             // This is taking advantage of the fact that they both begin with A
             // This should be improved in the future
-            var people = _libraryManager.GetPeople(item).OrderBy(i => i.SortOrder ?? int.MaxValue)
+            var people = source.OrderBy(i => i.SortOrder ?? int.MaxValue)
                 .ThenBy(i =>
                 {
                     if (i.IsType(PersonKind.Actor))
@@ -957,7 +1032,8 @@ namespace Emby.Server.Implementations.Dto
         /// <param name="options">The options.</param>
         /// <param name="artistsBatch">Optional pre-fetched artist lookup shared across a batch of items.</param>
         /// <param name="user">The user, for per-user values such as the accessible media source count.</param>
-        private void AttachBasicFields(BaseItemDto dto, BaseItem item, BaseItem? owner, DtoOptions options, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null, User? user = null)
+        /// <param name="alternateVersionItemIds">Optional pre-fetched set of item IDs that own alternate versions, shared across a batch of items.</param>
+        private void AttachBasicFields(BaseItemDto dto, BaseItem item, BaseItem? owner, DtoOptions options, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null, User? user = null, IReadOnlySet<Guid>? alternateVersionItemIds = null)
         {
             if (options.ContainsField(ItemFields.DateCreated))
             {
@@ -1271,15 +1347,27 @@ namespace Emby.Server.Implementations.Dto
 
                 if (options.ContainsField(ItemFields.MediaSourceCount))
                 {
-                    // Match the per-user filtering of the media sources: versions the user cannot
-                    // access are not selectable, so they must not count towards the badge either.
-                    var mediaSourceCount = user is null
-                        || (!video.PrimaryVersionId.HasValue && video.LinkedAlternateVersions.Length == 0 && !video.HasLocalAlternateVersions)
-                            ? video.MediaSourceCount
-                            : video.GetAllVersions().Count(v => v.Id.Equals(video.Id) || v.IsVisibleStandalone(user));
-                    if (mediaSourceCount != 1)
+                    // A video with no primary version and no alternate versions always has a single
+                    // media source. Only compute the count for videos that might have more: a primary
+                    // version, or membership in the batch's set of items that own alternate versions.
+                    // Without the batch we can't rule it out, so fall back to computing (the single-item
+                    // path). Everything else is the common case and keeps the default count of one.
+                    var mayHaveAlternateVersions = alternateVersionItemIds is null
+                        || video.PrimaryVersionId.HasValue
+                        || alternateVersionItemIds.Contains(video.Id);
+
+                    if (mayHaveAlternateVersions)
                     {
-                        dto.MediaSourceCount = mediaSourceCount;
+                        // Match the per-user filtering of the media sources: versions the user cannot
+                        // access are not selectable, so they must not count towards the badge either.
+                        var mediaSourceCount = user is null
+                            || (!video.PrimaryVersionId.HasValue && video.LinkedAlternateVersions.Length == 0 && !video.HasLocalAlternateVersions)
+                                ? video.MediaSourceCount
+                                : video.GetAllVersions().Count(v => v.Id.Equals(video.Id) || v.IsVisibleStandalone(user));
+                        if (mediaSourceCount != 1)
+                        {
+                            dto.MediaSourceCount = mediaSourceCount;
+                        }
                     }
                 }
 

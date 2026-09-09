@@ -442,7 +442,8 @@ namespace MediaBrowser.Controller.MediaEncoding
                    && (state.VideoStream.VideoRangeType == VideoRangeType.HDR10
                        || IsHdr10Plus(state.VideoStream)
                        || IsDoviWithHdr10Bl(state.VideoStream)
-                       || state.VideoStream.VideoRangeType == VideoRangeType.HLG);
+                       || state.VideoStream.VideoRangeType == VideoRangeType.HLG
+                       || state.VideoStream.VideoRangeType == VideoRangeType.DOVIInvalid);
         }
 
         private static bool IsDeinterlaceAvailable(EncodingJobInfo state)
@@ -695,7 +696,11 @@ namespace MediaBrowser.Controller.MediaEncoding
                 "ogg" or "oga" or "ogv" or "webm" or "webma" => "opus",
                 "m4a" or "m4b" or "mp4" or "mov" or "mkv" or "mka" => "aac",
                 "ts" or "avi" or "flv" or "f4v" or "swf" => "mp3",
-                _ => inferredCodec
+                // Containers that share their name with the codec they carry.
+                "aac" or "ac3" or "alac" or "dts" or "eac3" or "flac" or "mp2" or "mp3" or "opus" or "truehd" or "vorbis" => inferredCodec,
+                // Anything else - manifests such as m3u8/mpd in particular - names a container that
+                // is not an audio codec. Never hand that name to ffmpeg as an encoder.
+                _ => "aac"
             };
         }
 
@@ -1318,7 +1323,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     arg.Append(canvasArgs);
                 }
 
-                arg.Append(" -i file:\"").Append(subtitlePath).Append('\"');
+                arg.Append(" -i file:\"").Append(subtitlePath.EscapeProcessArgument()).Append('\"');
             }
 
             if (state.AudioStream is not null && state.AudioStream.IsExternal)
@@ -1330,7 +1335,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     arg.Append(' ').Append(seekAudioParam);
                 }
 
-                arg.Append(" -i \"").Append(state.AudioStream.Path).Append('"');
+                arg.Append(" -i \"").Append(state.AudioStream.Path.EscapeProcessArgument()).Append('"');
             }
 
             // Disable auto inserted SW scaler for HW decoders in case of changed resolution.
@@ -1386,7 +1391,8 @@ namespace MediaBrowser.Controller.MediaEncoding
                 or VideoRangeType.DOVIWithEL
                 or VideoRangeType.DOVIWithHDR10Plus
                 or VideoRangeType.DOVIWithELHDR10Plus
-                or VideoRangeType.DOVIInvalid;
+                || (rangeType == VideoRangeType.DOVIInvalid
+                    && string.Equals(stream.ColorTransfer, "smpte2084", StringComparison.OrdinalIgnoreCase)); // invalid may be hlg now
         }
 
         public static bool IsDovi(MediaStream stream)
@@ -1396,7 +1402,8 @@ namespace MediaBrowser.Controller.MediaEncoding
             return IsDoviWithHdr10Bl(stream)
                    || (rangeType is VideoRangeType.DOVI
                        or VideoRangeType.DOVIWithHLG
-                       or VideoRangeType.DOVIWithSDR);
+                       or VideoRangeType.DOVIWithSDR
+                       or VideoRangeType.DOVIInvalid);
         }
 
         public static bool IsHdr10Plus(MediaStream stream)
@@ -1416,7 +1423,8 @@ namespace MediaBrowser.Controller.MediaEncoding
         private static DynamicHdrMetadataRemovalPlan ShouldRemoveDynamicHdrMetadata(EncodingJobInfo state)
         {
             var videoStream = state.VideoStream;
-            if (videoStream.VideoRange is not VideoRange.HDR)
+            if (videoStream.VideoRange is not VideoRange.HDR
+                && videoStream.VideoRangeType != VideoRangeType.DOVIInvalid)
             {
                 return DynamicHdrMetadataRemovalPlan.None;
             }
@@ -6324,7 +6332,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                         string.Join(',', overlayFilters));
 
                 var mapPrefix = Convert.ToInt32(state.SubtitleStream.IsExternal);
-                var subtitleStreamIndex = FindIndex(state.MediaSource.MediaStreams, state.SubtitleStream);
+                var subtitleStreamIndex = GetSubtitleStreamIndexForFfmpeg(state.MediaSource, state.SubtitleStream);
                 var videoStreamIndex = FindIndex(state.MediaSource.MediaStreams, state.VideoStream);
 
                 if (hasSubs)
@@ -7877,10 +7885,16 @@ namespace MediaBrowser.Controller.MediaEncoding
                 audioTranscodeParams.Add("-acodec " + GetAudioEncoder(state));
             }
 
-            if (GetAudioEncoder(state).StartsWith("pcm_", StringComparison.Ordinal))
+            // The pcm_* encoders emit raw samples that carry no header of their own, so the header
+            // has to come from the muxer. Only force the matching raw muxer when the client actually
+            // asked for a raw container (added in #10321 for I2S/MCU clients): applying it to every
+            // pcm_* codec also strips the RIFF header from a `stream.wav` request, which then serves
+            // headerless PCM behind an audio/wav content type.
+            var audioEncoder = GetAudioEncoder(state);
+            if (audioEncoder.StartsWith("pcm_", StringComparison.Ordinal)
+                && string.Equals(state.OutputContainer, "pcm", StringComparison.OrdinalIgnoreCase))
             {
-                audioTranscodeParams.Add(string.Concat("-f ", GetAudioEncoder(state).AsSpan(4)));
-                audioTranscodeParams.Add("-ar " + state.BaseRequest.AudioBitRate);
+                audioTranscodeParams.Add(string.Concat("-f ", audioEncoder.AsSpan(4)));
             }
 
             var sampleRate = state.OutputAudioSampleRate;
@@ -7948,6 +7962,24 @@ namespace MediaBrowser.Controller.MediaEncoding
             }
 
             return -1;
+        }
+
+        public static int GetSubtitleStreamIndexForFfmpeg(MediaSourceInfo mediaSource, MediaStream subtitleStream)
+        {
+            var index = FindIndex(mediaSource.MediaStreams, subtitleStream);
+            if (index == -1 || subtitleStream.IsExternal || mediaSource.VideoType != VideoType.BluRay)
+            {
+                return index;
+            }
+
+            var hiddenStreamsBefore = mediaSource.MediaStreams.Count(s =>
+                s.Type == MediaStreamType.Audio
+                && !s.IsExternal
+                && (string.Equals(s.Codec, "truehd", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(s.Codec, "atmos", StringComparison.OrdinalIgnoreCase))
+                && s.Index < subtitleStream.Index);
+
+            return index + hiddenStreamsBefore;
         }
 
         public static bool IsCopyCodec(string codec)

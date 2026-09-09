@@ -1,6 +1,4 @@
-using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Threading;
@@ -57,9 +55,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
         /// <inheritdoc />
         public async Task<IEnumerable<RemoteImageInfo>> GetImages(BaseItem item, CancellationToken cancellationToken)
         {
-            var tmdbId = item.GetProviderId(MetadataProvider.Tmdb);
-
-            if (string.IsNullOrEmpty(tmdbId))
+            if (!item.TryGetTmdbId(out var tmdbId))
             {
                 return Enumerable.Empty<RemoteImageInfo>();
             }
@@ -69,7 +65,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
 
             var series = await _tmdbClientManager
                 .GetSeriesAsync(
-                    Convert.ToInt32(tmdbId, CultureInfo.InvariantCulture),
+                    tmdbId,
                     language,
                     TmdbUtils.GetImageLanguagesParam(language, countryCode),
                     countryCode,

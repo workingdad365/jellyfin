@@ -103,6 +103,7 @@ namespace MediaBrowser.Controller.Entities
             || SubtitleLanguages.Count > 0
             || LinkedChildAncestorIds.Length > 0
             || AncestorIds.Length > 0
+            || DescendantOfId.HasValue
             || IsFavorite.HasValue
             || IsFavoriteOrLiked.HasValue
             || IsLiked.HasValue
@@ -368,6 +369,13 @@ namespace MediaBrowser.Controller.Entities
         /// </summary>
         public Guid[] LinkedChildAncestorIds { get; set; }
 
+        /// <summary>
+        /// Gets or sets the id of a folder whose descendants the items must be part of.
+        /// Unlike <see cref="AncestorIds"/> this also follows the linked children of BoxSets and
+        /// Playlists, so it reaches the items below a linked folder (a Series' episodes, for example).
+        /// </summary>
+        public Guid? DescendantOfId { get; set; }
+
         public Guid[] TopParentIds { get; set; }
 
         public CollectionType?[] PresetViews { get; set; }
@@ -424,12 +432,18 @@ namespace MediaBrowser.Controller.Entities
 
         public string? HasNoSubtitleTrackWithLanguage { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether to return only items nothing names any more.
+        /// </summary>
         public bool? IsDeadArtist { get; set; }
 
         public bool? IsDeadStudio { get; set; }
 
         public bool? IsDeadGenre { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether to return only items nothing names any more.
+        /// </summary>
         public bool? IsDeadPerson { get; set; }
 
         /// <summary>
@@ -496,6 +510,12 @@ namespace MediaBrowser.Controller.Entities
 
         public IReadOnlyList<string> SubtitleLanguages { get; set; }
 
+        /// <summary>
+        /// Gets a value indicating whether some content in the library is hidden from <see cref="User"/>.
+        /// Filters that only exist to hide content can be skipped entirely when this is false.
+        /// </summary>
+        public bool UserHasContentRestrictions { get; private set; }
+
         public void SetUser(User user)
         {
             var maxRating = user.MaxParentalRatingScore;
@@ -519,6 +539,7 @@ namespace MediaBrowser.Controller.Entities
                 .Select(tag => tag.RemoveDiacritics().ToLowerInvariant())
                 .ToArray();
 
+            UserHasContentRestrictions = user.HasContentRestrictions();
             User = user;
         }
 

@@ -163,6 +163,8 @@ namespace MediaBrowser.Providers.Manager
             _externalUrlProviders = externalUrlProviders.OrderBy(i => i.Name).ToArray();
 
             _savers = metadataSavers.ToArray();
+
+            ClearMetadataProviderCache();
         }
 
         /// <inheritdoc/>
@@ -436,6 +438,14 @@ namespace MediaBrowser.Providers.Manager
                 return false;
             }
 
+            // Extras have no identity of their own in an online database, so remote artwork for them
+            // is always some other item's. Local and dynamic providers still apply, so an extra can
+            // keep an embedded thumbnail or an extracted frame.
+            if (item.ExtraType.HasValue && provider is IRemoteImageProvider)
+            {
+                return false;
+            }
+
             return _baseItemManager.IsImageFetcherEnabled(item, libraryTypeOptions, provider.Name);
         }
 
@@ -582,6 +592,14 @@ namespace MediaBrowser.Providers.Manager
             if (forceEnableInternetMetadata || provider is not IRemoteMetadataProvider)
             {
                 return true;
+            }
+
+            // An extra is a local file belonging to another item and has no identity of its own in an
+            // online database. Looking it up matches whatever the surrounding folder happens to be
+            // called and overwrites the extra's name with a different item's title.
+            if (item.ExtraType.HasValue)
+            {
+                return false;
             }
 
             // Artists without a folder structure that are derived from metadata have no real path in the library,
@@ -1125,16 +1143,21 @@ namespace MediaBrowser.Providers.Manager
                 return;
             }
 
-            _refreshQueue.Enqueue((itemId, options), priority);
-
+            // PriorityQueue is not thread safe and the processor dequeues concurrently, so every
+            // touch of the queue takes the lock.
             lock (_refreshQueueLock)
             {
-                if (!_isProcessingRefreshQueue)
+                _refreshQueue.Enqueue((itemId, options), priority);
+
+                if (_isProcessingRefreshQueue)
                 {
-                    _isProcessingRefreshQueue = true;
-                    Task.Run(StartProcessingRefreshQueue);
+                    return;
                 }
+
+                _isProcessingRefreshQueue = true;
             }
+
+            Task.Run(StartProcessingRefreshQueue);
         }
 
         private async Task StartProcessingRefreshQueue()
@@ -1143,17 +1166,33 @@ namespace MediaBrowser.Providers.Manager
 
             if (_disposed)
             {
+                lock (_refreshQueueLock)
+                {
+                    _isProcessingRefreshQueue = false;
+                }
+
                 return;
             }
 
             var cancellationToken = _disposeCancellationTokenSource.Token;
 
             libraryManager.ClearIgnoreRuleCache();
-            while (_refreshQueue.TryDequeue(out var refreshItem, out _))
+
+            while (true)
             {
-                if (_disposed)
+                (Guid ItemId, MetadataRefreshOptions RefreshOptions) refreshItem;
+
+                // Dequeueing and standing down happen under one lock, otherwise a refresh queued
+                // just after the queue ran dry would see a processor that has already stopped.
+                lock (_refreshQueueLock)
                 {
-                    return;
+                    if (_disposed
+                        || cancellationToken.IsCancellationRequested
+                        || !_refreshQueue.TryDequeue(out refreshItem, out _))
+                    {
+                        _isProcessingRefreshQueue = false;
+                        break;
+                    }
                 }
 
                 try
@@ -1170,19 +1209,21 @@ namespace MediaBrowser.Providers.Manager
 
                     await task.ConfigureAwait(false);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    break;
+                    // Shutting down: the next pass sees the token and stands the processor down.
+                    continue;
                 }
                 catch (Exception ex)
                 {
+                    // Includes a provider that cancelled for its own reasons, such as an HTTP
+                    // timeout, which must not stop the queue draining.
                     _logger.LogError(ex, "Error refreshing item");
                 }
             }
 
-            lock (_refreshQueueLock)
+            if (!_disposed)
             {
-                _isProcessingRefreshQueue = false;
                 libraryManager.ClearIgnoreRuleCache();
             }
         }

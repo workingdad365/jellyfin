@@ -176,14 +176,6 @@ public class ItemPersistenceService : IItemPersistenceService
         var context = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using (context.ConfigureAwait(false))
         {
-            if (!await context.BaseItems
-                .AnyAsync(bi => bi.Id == item.Id, cancellationToken)
-                .ConfigureAwait(false))
-            {
-                _logger.LogWarning("Unable to save ImageInfo for non existing BaseItem");
-                return;
-            }
-
             await context.BaseItemImageInfos
                 .Where(e => e.ItemId == item.Id)
                 .ExecuteDeleteAsync(cancellationToken)
@@ -193,7 +185,26 @@ public class ItemPersistenceService : IItemPersistenceService
                 .AddRangeAsync(images, cancellationToken)
                 .ConfigureAwait(false);
 
-            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (DbUpdateException)
+            {
+                // Checking that the item exists before writing leaves a gap a scan can delete it
+                // through, turning the insert into a foreign key violation that fails the whole
+                // refresh instead of the no-op intended here. Let the insert be the check: it is the
+                // only point at which the answer cannot go stale. Nothing is orphaned by the delete
+                // above, because deleting the item cascades to its images anyway.
+                if (await context.BaseItems
+                    .AnyAsync(bi => bi.Id == item.Id, cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    throw;
+                }
+
+                _logger.LogWarning("Unable to save ImageInfo for non existing BaseItem {ItemId}", item.Id);
+            }
         }
     }
 
@@ -257,23 +268,19 @@ public class ItemPersistenceService : IItemPersistenceService
         using var transaction = context.Database.BeginTransaction();
 
         var ids = tuples.Select(f => f.Item.Id).ToArray();
-        var existingItems = context.BaseItems.Where(e => ids.Contains(e.Id)).Select(f => f.Id).ToArray();
+        var existingItems = context.BaseItems.Where(e => ids.Contains(e.Id)).Select(f => f.Id).ToHashSet();
 
         foreach (var item in tuples)
         {
             var entity = BaseItemMapper.Map(item.Item, _appHost);
             entity.TopParentId = item.TopParent?.Id;
 
-            if (!existingItems.Any(e => e == entity.Id))
+            if (!existingItems.Contains(entity.Id))
             {
                 context.BaseItems.Add(entity);
             }
             else
             {
-                context.BaseItemProviders.Where(e => e.ItemId == entity.Id).ExecuteDelete();
-                context.BaseItemImageInfos.Where(e => e.ItemId == entity.Id).ExecuteDelete();
-                context.BaseItemMetadataFields.Where(e => e.ItemId == entity.Id).ExecuteDelete();
-
                 if (entity.Images is { Count: > 0 })
                 {
                     context.BaseItemImageInfos.AddRange(entity.Images);
@@ -314,9 +321,11 @@ public class ItemPersistenceService : IItemPersistenceService
         }).ToArray();
         context.ItemValues.AddRange(missingItemValues);
 
-        var itemValuesStore = existingValues.Concat(missingItemValues).ToArray();
+        var itemValuesStore = existingValues
+            .Concat(missingItemValues)
+            .ToDictionary(e => (e.Type, e.Value));
         var valueMap = itemValueMaps
-            .Select(f => (f.Item, Values: f.Values.Select(e => itemValuesStore.First(g => g.Value == e.Value && g.Type == e.MagicNumber)).DistinctBy(e => e.ItemValueId).ToArray()))
+            .Select(f => (f.Item, Values: f.Values.Select(e => itemValuesStore[(e.MagicNumber, e.Value)]).DistinctBy(e => e.ItemValueId).ToArray()))
             .ToArray();
 
         var mappedValues = context.ItemValuesMap.Where(e => ids.Contains(e.ItemId)).ToList();
@@ -399,6 +408,15 @@ public class ItemPersistenceService : IItemPersistenceService
 
                 context.AncestorIds.RemoveRange(existingAncestorIds);
             }
+        }
+
+        // Owned rows of updated items are rewritten wholesale; cleared in one statement per table.
+        if (existingItems.Count > 0)
+        {
+            var updatedIds = existingItems.ToArray();
+            context.BaseItemProviders.WhereOneOrMany(updatedIds, e => e.ItemId).ExecuteDelete();
+            context.BaseItemImageInfos.WhereOneOrMany(updatedIds, e => e.ItemId).ExecuteDelete();
+            context.BaseItemMetadataFields.WhereOneOrMany(updatedIds, e => e.ItemId).ExecuteDelete();
         }
 
         context.SaveChanges();
@@ -531,7 +549,7 @@ public class ItemPersistenceService : IItemPersistenceService
                 var childIdsToCheck = resolvedChildren.Select(c => c.ChildId).Distinct().ToList();
                 var existingChildIds = childIdsToCheck.Count > 0
                     ? context.BaseItems
-                        .Where(e => childIdsToCheck.Contains(e.Id))
+                        .WhereOneOrMany(childIdsToCheck, e => e.Id)
                         .Select(e => e.Id)
                         .ToHashSet()
                     : [];

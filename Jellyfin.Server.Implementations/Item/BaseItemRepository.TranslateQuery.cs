@@ -35,6 +35,49 @@ public sealed partial class BaseItemRepository
     // instance across several lambdas, and this filter is combined into a tree more than once.
     private static Expression<Func<BaseItemEntity, bool>> IsFolderFilter => e => e.IsFolder;
 
+    // Shared by the isPlayed filter and the IsPlayed/IsUnplayed ordering so the two cannot disagree.
+    private Expression<Func<BaseItemEntity, bool>> BuildIsPlayedFilter(JellyfinDbContext context, User user)
+    {
+        // Folders (Series, Seasons, BoxSets, albums, ...) carry no played state of their own and count
+        // as played once no descendant is left unplayed.
+        var unplayedLeafItems = GetAccessFilteredLeafItemsQuery(context, user)
+            .Where(BuildLeafIsPlayedFilter(context, user.Id).Not());
+
+        return IsFolderFilter.And(BuildHasDescendantFilter(context, unplayedLeafItems).Not())
+            .Or(IsFolderFilter.Not().And(BuildLeafIsPlayedFilter(context, user.Id)));
+    }
+
+    private static Expression<Func<BaseItemEntity, bool>> BuildLeafIsPlayedFilter(JellyfinDbContext context, Guid userId)
+    {
+        var playedItemIds = context.UserData
+            .Where(ud => ud.UserId == userId && ud.Played)
+            .Select(ud => ud.ItemId);
+
+        // The primaries of every version group holding a played row, whichever version carries it.
+        var playedGroupIds = context.BaseItems
+            .Where(v => v.PrimaryVersionId != null
+                && context.UserData.Any(ud => ud.UserId == userId
+                    && ud.Played
+                    && (ud.ItemId == v.Id || ud.ItemId == v.PrimaryVersionId)))
+            .Select(v => v.PrimaryVersionId!.Value);
+
+        return e => playedItemIds.Contains(e.Id)
+            || playedGroupIds.Contains(e.Id)
+            || (e.PrimaryVersionId != null && playedGroupIds.Contains(e.PrimaryVersionId.Value));
+    }
+
+    // "und" is the language filters' stand-in for a track that declares no language at all.
+    private static string NormalizeLanguage(string language)
+        => string.Equals(language, "und", StringComparison.OrdinalIgnoreCase) ? "und" : language;
+
+    // The primary versions whose alternate version satisfies a dimension bound. Anchored on
+    // PrimaryVersionId so the filtered index carries it rather than a scan of every item.
+    private static IQueryable<Guid> VersionsMatchingDimension(JellyfinDbContext context, Expression<Func<BaseItemEntity, bool>> bound)
+        => context.BaseItems
+            .Where(v => v.PrimaryVersionId != null)
+            .Where(bound)
+            .Select(v => v.PrimaryVersionId!.Value);
+
     /// <inheritdoc />
     public IQueryable<BaseItemEntity> TranslateQuery(
         IQueryable<BaseItemEntity> baseQuery,
@@ -70,47 +113,86 @@ public sealed partial class BaseItemRepository
                 include4K = true;
             }
 
-            // Non-folders: check own resolution directly (no subquery).
-            // Folders (Series, BoxSets): EXISTS check on descendants/linked children.
-            // Using navigation properties (a.Item, lc.Child) produces efficient
-            // EXISTS + JOIN instead of nested IN (SELECT ...) subqueries.
+            // A 4K remux of an SD primary is a version of the same item, so the bucket a caller filters
+            // on is the best any of the item's versions offers, not just the primary file's. Three sets,
+            // because a bucket is as much about what the version group does not have as what it does, and
+            // because an unprobed primary can still be placed by a version that does carry dimensions.
+            // The filtered PrimaryVersionId index keeps all three to the few items that have versions.
+            var versionsSd = VersionsMatchingDimension(context, v => v.Width > 0 && v.Width < HDWidth);
+            var versionsHd = VersionsMatchingDimension(context, v => v.Width >= HDWidth);
+            var versions4K = VersionsMatchingDimension(context, v => v.Width >= UHDWidth || v.Height >= UHDHeight);
+
+            // Only the SD test needs the Width > 0 guard against a row with no dimensions: such a row
+            // cannot reach the HD or 4K bound anyway, and EF lowers the HD bucket's negated "not itself
+            // 4K" guard to CASE WHEN ... THEN 0 ELSE 1, which already reads unknown as not 4K rather
+            // than propagating a null. Folders (Series, BoxSets) answer on their descendants, bucketed
+            // exactly as a top-level item is so that the two cannot disagree; the navigation properties
+            // (a.Item, lc.Child) give EXISTS + JOIN rather than nested IN (SELECT ...).
             baseQuery = baseQuery.Where(e =>
-                (!e.IsFolder && e.Width > 0
-                    && ((includeSD && e.Width < HDWidth)
-                        || (includeHD && e.Width >= HDWidth && !(e.Width >= UHDWidth || e.Height >= UHDHeight))
-                        || (include4K && (e.Width >= UHDWidth || e.Height >= UHDHeight))))
+                (!e.IsFolder
+                    && ((includeSD
+                            && ((e.Width > 0 && e.Width < HDWidth) || versionsSd.Contains(e.Id))
+                            && !versionsHd.Contains(e.Id)
+                            && !versions4K.Contains(e.Id))
+                        || (includeHD
+                            && (e.Width >= HDWidth || versionsHd.Contains(e.Id))
+                            && !(e.Width >= UHDWidth || e.Height >= UHDHeight)
+                            && !versions4K.Contains(e.Id))
+                        || (include4K
+                            && (e.Width >= UHDWidth || e.Height >= UHDHeight || versions4K.Contains(e.Id)))))
                 || (e.IsFolder
                     && (e.Children!.Any(a =>
-                            a.Item.Width > 0
-                            && ((includeSD && a.Item.Width < HDWidth)
-                                || (includeHD && a.Item.Width >= HDWidth && !(a.Item.Width >= UHDWidth || a.Item.Height >= UHDHeight))
-                                || (include4K && (a.Item.Width >= UHDWidth || a.Item.Height >= UHDHeight))))
+                            (includeSD
+                                && ((a.Item.Width > 0 && a.Item.Width < HDWidth) || versionsSd.Contains(a.ItemId))
+                                && !versionsHd.Contains(a.ItemId)
+                                && !versions4K.Contains(a.ItemId))
+                            || (includeHD
+                                && (a.Item.Width >= HDWidth || versionsHd.Contains(a.ItemId))
+                                && !(a.Item.Width >= UHDWidth || a.Item.Height >= UHDHeight)
+                                && !versions4K.Contains(a.ItemId))
+                            || (include4K
+                                && (a.Item.Width >= UHDWidth || a.Item.Height >= UHDHeight || versions4K.Contains(a.ItemId))))
                         || context.LinkedChildren.Any(lc =>
                             lc.ParentId == e.Id
-                            && lc.Child!.Width > 0
-                            && ((includeSD && lc.Child.Width < HDWidth)
-                                || (includeHD && lc.Child.Width >= HDWidth && !(lc.Child.Width >= UHDWidth || lc.Child.Height >= UHDHeight))
-                                || (include4K && (lc.Child.Width >= UHDWidth || lc.Child.Height >= UHDHeight)))))));
+                            && ((includeSD
+                                    && ((lc.Child!.Width > 0 && lc.Child!.Width < HDWidth) || versionsSd.Contains(lc.ChildId))
+                                    && !versionsHd.Contains(lc.ChildId)
+                                    && !versions4K.Contains(lc.ChildId))
+                                || (includeHD
+                                    && (lc.Child!.Width >= HDWidth || versionsHd.Contains(lc.ChildId))
+                                    && !(lc.Child!.Width >= UHDWidth || lc.Child!.Height >= UHDHeight)
+                                    && !versions4K.Contains(lc.ChildId))
+                                || (include4K
+                                    && (lc.Child!.Width >= UHDWidth || lc.Child!.Height >= UHDHeight || versions4K.Contains(lc.ChildId))))))));
         }
 
+        // Same reasoning as the resolution filter: a dimension bound is met if any version meets it.
         if (minWidth.HasValue)
         {
-            baseQuery = baseQuery.Where(e => e.Width >= minWidth);
+            var versionsWideEnough = VersionsMatchingDimension(context, v => v.Width >= minWidth);
+            baseQuery = baseQuery.Where(e => e.Width >= minWidth || versionsWideEnough.Contains(e.Id));
         }
 
         if (filter.MinHeight.HasValue)
         {
-            baseQuery = baseQuery.Where(e => e.Height >= filter.MinHeight);
+            var minHeight = filter.MinHeight;
+            var versionsTallEnough = VersionsMatchingDimension(context, v => v.Height >= minHeight);
+            baseQuery = baseQuery.Where(e => e.Height >= minHeight || versionsTallEnough.Contains(e.Id));
         }
 
+        // An upper bound inverts that: it is met only if no version breaches it, since the item's
+        // resolution is the best its version group offers.
         if (maxWidth.HasValue)
         {
-            baseQuery = baseQuery.Where(e => e.Width <= maxWidth);
+            var versionsTooWide = VersionsMatchingDimension(context, v => v.Width > maxWidth);
+            baseQuery = baseQuery.Where(e => e.Width <= maxWidth && !versionsTooWide.Contains(e.Id));
         }
 
         if (filter.MaxHeight.HasValue)
         {
-            baseQuery = baseQuery.Where(e => e.Height <= filter.MaxHeight);
+            var maxHeight = filter.MaxHeight;
+            var versionsTooTall = VersionsMatchingDimension(context, v => v.Height > maxHeight);
+            baseQuery = baseQuery.Where(e => e.Height <= maxHeight && !versionsTooTall.Contains(e.Id));
         }
 
         if (filter.IsLocked.HasValue)
@@ -356,7 +438,7 @@ public sealed partial class BaseItemRepository
             }
             else
             {
-                baseQuery = baseQuery.Where(e => e.StartDate > now && e.EndDate < now);
+                baseQuery = baseQuery.Where(e => e.StartDate > now || e.EndDate < now);
             }
         }
 
@@ -370,14 +452,16 @@ public sealed partial class BaseItemRepository
                     p => p.Name,
                     (b, p) => p.Id);
 
+            var personTypes = filter.PersonTypes;
             baseQuery = baseQuery
                 .Where(e => context.PeopleBaseItemMap
-                    .Any(m => m.ItemId == e.Id && peopleEntityIds.Contains(m.PeopleId)));
+                    .Any(m => m.ItemId == e.Id && peopleEntityIds.Contains(m.PeopleId) && (personTypes.Length == 0 || personTypes.Contains(m.People.PersonType))));
         }
 
         if (!string.IsNullOrWhiteSpace(filter.Person))
         {
-            baseQuery = baseQuery.Where(e => e.Peoples!.Any(f => f.People.Name == filter.Person));
+            var personTypes = filter.PersonTypes;
+            baseQuery = baseQuery.Where(e => e.Peoples!.Any(f => f.People.Name == filter.Person && (personTypes.Length == 0 || personTypes.Contains(f.People.PersonType))));
         }
 
         if (!string.IsNullOrWhiteSpace(filter.ExternalSeriesId))
@@ -470,22 +554,7 @@ public sealed partial class BaseItemRepository
 
         if (filter.IsPlayed.HasValue)
         {
-            var userId = filter.User!.Id;
-
-            // Leaf items carry their own played state.
-            var playedItemIds = context.UserData
-                .Where(ud => ud.UserId == userId && ud.Played)
-                .Select(ud => ud.ItemId);
-
-            // Folders (Series, Seasons, BoxSets, albums, ...) have none and count as played once no
-            // descendant is left unplayed, matching what the DTO reports for them. This has to key off
-            // the item itself rather than off the requested item types: tag and collection listings mix
-            // folders and leaf items in a single query.
-            var unplayedLeafItems = GetAccessFilteredLeafItemsQuery(context, filter.User!)
-                .Where(e => !e.UserData!.Any(ud => ud.UserId == userId && ud.Played));
-
-            var isPlayedFilter = IsFolderFilter.And(BuildHasDescendantFilter(context, unplayedLeafItems).Not())
-                .Or(IsFolderFilter.Not().And(e => playedItemIds.Contains(e.Id)));
+            var isPlayedFilter = BuildIsPlayedFilter(context, filter.User!);
 
             baseQuery = baseQuery.Where(filter.IsPlayed.Value ? isPlayedFilter : isPlayedFilter.Not());
         }
@@ -499,16 +568,21 @@ public sealed partial class BaseItemRepository
             var inProgress = context.UserData
                 .Where(ud => ud.UserId == userId && ud.PlaybackPositionTicks > 0);
 
-            // Folders are resumable when a descendant is in progress, or when they hold both played and
-            // unplayed descendants (partially watched). Alternate versions keep their own progress, so
-            // they count towards the in-progress check but not towards the played/unplayed one.
+            // Series and Seasons are resumable when a descendant is in progress, or when they hold both
+            // played and unplayed descendants (partially watched). Alternate versions keep their own
+            // progress, so they count towards the in-progress check but not towards the played/unplayed one.
             var leafItems = GetAccessFilteredLeafItemsQuery(context, filter.User!);
             var inProgressLeafItems = GetAccessFilteredLeafItemsQuery(context, filter.User!, includeOwnedItems: true)
                 .Where(e => e.UserData!.Any(ud => ud.UserId == userId && ud.PlaybackPositionTicks > 0));
 
-            var folderResumableFilter = BuildHasDescendantFilter(context, inProgressLeafItems)
-                .Or(BuildHasDescendantFilter(context, leafItems.Where(e => e.UserData!.Any(ud => ud.UserId == userId && ud.Played)))
-                    .And(BuildHasDescendantFilter(context, leafItems.Where(e => !e.UserData!.Any(ud => ud.UserId == userId && ud.Played)))));
+            // Every other folder kind is a container rather than one continuous piece of media
+            var resumableFolderTypes = _resumableFolderKinds
+                .Select(kind => _itemTypeLookup.BaseItemKindNames.GetValueOrDefault(kind))
+                .ToArray();
+            var folderIsResumableFilter = IsFolderFilter.And(e => resumableFolderTypes.Contains(e.Type))
+                .And(BuildHasDescendantFilter(context, inProgressLeafItems)
+                    .Or(BuildHasDescendantFilter(context, leafItems.Where(e => e.UserData!.Any(ud => ud.UserId == userId && ud.Played)))
+                        .And(BuildHasDescendantFilter(context, leafItems.Where(e => !e.UserData!.Any(ud => ud.UserId == userId && ud.Played))))));
 
             if (isResumable)
             {
@@ -516,7 +590,7 @@ public sealed partial class BaseItemRepository
                 // Match each version on its own progress rather than coalescing onto the primary.
                 var inProgressIds = inProgress.Select(ud => ud.ItemId);
 
-                baseQuery = baseQuery.Where(IsFolderFilter.And(folderResumableFilter)
+                baseQuery = baseQuery.Where(folderIsResumableFilter
                     .Or(IsFolderFilter.Not().And(e => inProgressIds.Contains(e.Id))));
 
                 // When several versions of the same item are in progress, keep only the most recently played one, use id as tiebreaker.
@@ -543,14 +617,14 @@ public sealed partial class BaseItemRepository
                 var resumableMovieIds = inProgress
                     .Join(context.BaseItems, ud => ud.ItemId, bi => bi.Id, (ud, bi) => bi.PrimaryVersionId ?? bi.Id);
 
-                baseQuery = baseQuery.Where(IsFolderFilter.And(folderResumableFilter.Not())
+                baseQuery = baseQuery.Where(IsFolderFilter.And(folderIsResumableFilter.Not())
                     .Or(IsFolderFilter.Not().And(e => !resumableMovieIds.Contains(e.Id))));
             }
         }
 
         if (filter.ArtistIds.Length > 0)
         {
-            baseQuery = baseQuery.WhereReferencedItemMultipleTypes(context, [ItemValueType.Artist, ItemValueType.AlbumArtist], filter.ArtistIds);
+            baseQuery = baseQuery.WhereReferencedItem(context, [ItemValueType.Artist, ItemValueType.AlbumArtist], filter.ArtistIds);
         }
 
         if (filter.AlbumArtistIds.Length > 0)
@@ -581,12 +655,12 @@ public sealed partial class BaseItemRepository
 
         if (filter.ExcludeArtistIds.Length > 0)
         {
-            baseQuery = baseQuery.WhereReferencedItemMultipleTypes(context, [ItemValueType.Artist, ItemValueType.AlbumArtist], filter.ExcludeArtistIds, true);
+            baseQuery = baseQuery.WhereReferencedItem(context, [ItemValueType.Artist, ItemValueType.AlbumArtist], filter.ExcludeArtistIds, true);
         }
 
         if (filter.GenreIds.Count > 0)
         {
-            baseQuery = baseQuery.WhereReferencedItem(context, ItemValueType.Genre, filter.GenreIds.ToArray());
+            baseQuery = baseQuery.WhereReferencedItem(context, ItemValueType.Genre, filter.GenreIds);
         }
 
         if (filter.Genres.Count > 0)
@@ -612,7 +686,7 @@ public sealed partial class BaseItemRepository
 
         if (filter.StudioIds.Length > 0)
         {
-            baseQuery = baseQuery.WhereReferencedItem(context, ItemValueType.Studios, filter.StudioIds.ToArray());
+            baseQuery = baseQuery.WhereReferencedItem(context, ItemValueType.Studios, filter.StudioIds);
         }
 
         if (filter.OfficialRatings.Length > 0)
@@ -754,104 +828,144 @@ public sealed partial class BaseItemRepository
 
         if (!string.IsNullOrWhiteSpace(filter.HasNoAudioTrackWithLanguage))
         {
-            var lang = filter.HasNoAudioTrackWithLanguage;
-            var foldersWithAudio = DescendantQueryHelper.GetFolderIdsMatching(context, new HasMediaStreamType(MediaStreamTypeEntity.Audio, lang));
+            var lang = NormalizeLanguage(filter.HasNoAudioTrackWithLanguage);
+            var undetermined = string.Equals(lang, "und", StringComparison.Ordinal);
+            var criteria = new HasMediaStreamType(MediaStreamTypeEntity.Audio, lang);
+            // A track only an alternate version carries still belongs to the item a caller sees, so the
+            // item's own streams alone do not decide this. Same for every stream filter below.
+            var versionsWithAudio = DescendantQueryHelper.GetPrimaryVersionIdsMatching(context, criteria);
+            var foldersWithAudio = DescendantQueryHelper.GetFolderIdsMatching(context, criteria);
 
             baseQuery = baseQuery
                 .Where(e =>
-                    (!e.IsFolder && !e.MediaStreams!.Any(ms => ms.StreamType == MediaStreamTypeEntity.Audio && ms.Language == lang))
+                    (!e.IsFolder
+                        && !e.MediaStreams!.Any(ms => ms.StreamType == MediaStreamTypeEntity.Audio
+                            && (ms.Language == lang || (undetermined && string.IsNullOrEmpty(ms.Language))))
+                        && !versionsWithAudio.Contains(e.Id))
                     || (e.IsFolder && !foldersWithAudio.Contains(e.Id)));
         }
 
         if (!string.IsNullOrWhiteSpace(filter.HasNoInternalSubtitleTrackWithLanguage))
         {
-            var lang = filter.HasNoInternalSubtitleTrackWithLanguage;
-            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, new HasMediaStreamType(MediaStreamTypeEntity.Subtitle, lang, IsExternal: false));
+            var lang = NormalizeLanguage(filter.HasNoInternalSubtitleTrackWithLanguage);
+            var undetermined = string.Equals(lang, "und", StringComparison.Ordinal);
+            var criteria = new HasMediaStreamType(MediaStreamTypeEntity.Subtitle, lang, IsExternal: false);
+            var versionsWithSubtitles = DescendantQueryHelper.GetPrimaryVersionIdsMatching(context, criteria);
+            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, criteria);
 
             baseQuery = baseQuery
                 .Where(e =>
-                    (!e.IsFolder && !e.MediaStreams!.Any(ms => ms.StreamType == MediaStreamTypeEntity.Subtitle && !ms.IsExternal && ms.Language == lang))
+                    (!e.IsFolder
+                        && !e.MediaStreams!.Any(ms => ms.StreamType == MediaStreamTypeEntity.Subtitle && !ms.IsExternal
+                            && (ms.Language == lang || (undetermined && string.IsNullOrEmpty(ms.Language))))
+                        && !versionsWithSubtitles.Contains(e.Id))
                     || (e.IsFolder && !foldersWithSubtitles.Contains(e.Id)));
         }
 
         if (!string.IsNullOrWhiteSpace(filter.HasNoExternalSubtitleTrackWithLanguage))
         {
-            var lang = filter.HasNoExternalSubtitleTrackWithLanguage;
-            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, new HasMediaStreamType(MediaStreamTypeEntity.Subtitle, lang, IsExternal: true));
+            var lang = NormalizeLanguage(filter.HasNoExternalSubtitleTrackWithLanguage);
+            var undetermined = string.Equals(lang, "und", StringComparison.Ordinal);
+            var criteria = new HasMediaStreamType(MediaStreamTypeEntity.Subtitle, lang, IsExternal: true);
+            var versionsWithSubtitles = DescendantQueryHelper.GetPrimaryVersionIdsMatching(context, criteria);
+            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, criteria);
 
             baseQuery = baseQuery
                 .Where(e =>
-                    (!e.IsFolder && !e.MediaStreams!.Any(ms => ms.StreamType == MediaStreamTypeEntity.Subtitle && ms.IsExternal && ms.Language == lang))
+                    (!e.IsFolder
+                        && !e.MediaStreams!.Any(ms => ms.StreamType == MediaStreamTypeEntity.Subtitle && ms.IsExternal
+                            && (ms.Language == lang || (undetermined && string.IsNullOrEmpty(ms.Language))))
+                        && !versionsWithSubtitles.Contains(e.Id))
                     || (e.IsFolder && !foldersWithSubtitles.Contains(e.Id)));
         }
 
         if (!string.IsNullOrWhiteSpace(filter.HasNoSubtitleTrackWithLanguage))
         {
-            var lang = filter.HasNoSubtitleTrackWithLanguage;
-            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, new HasMediaStreamType(MediaStreamTypeEntity.Subtitle, lang));
+            var lang = NormalizeLanguage(filter.HasNoSubtitleTrackWithLanguage);
+            var undetermined = string.Equals(lang, "und", StringComparison.Ordinal);
+            var criteria = new HasMediaStreamType(MediaStreamTypeEntity.Subtitle, lang);
+            var versionsWithSubtitles = DescendantQueryHelper.GetPrimaryVersionIdsMatching(context, criteria);
+            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, criteria);
 
             baseQuery = baseQuery
                 .Where(e =>
-                    (!e.IsFolder && !e.MediaStreams!.Any(ms => ms.StreamType == MediaStreamTypeEntity.Subtitle && ms.Language == lang))
+                    (!e.IsFolder
+                        && !e.MediaStreams!.Any(ms => ms.StreamType == MediaStreamTypeEntity.Subtitle
+                            && (ms.Language == lang || (undetermined && string.IsNullOrEmpty(ms.Language))))
+                        && !versionsWithSubtitles.Contains(e.Id))
                     || (e.IsFolder && !foldersWithSubtitles.Contains(e.Id)));
         }
 
         if (filter.HasSubtitles.HasValue)
         {
             var hasSubtitles = filter.HasSubtitles.Value;
-            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, new HasSubtitles());
+            var criteria = new HasSubtitles();
+            var versionsWithSubtitles = DescendantQueryHelper.GetPrimaryVersionIdsMatching(context, criteria);
+            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, criteria);
             if (hasSubtitles)
             {
                 baseQuery = baseQuery
                     .Where(e =>
-                        (!e.IsFolder && e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle))
+                        (!e.IsFolder && (e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle)
+                            || versionsWithSubtitles.Contains(e.Id)))
                         || (e.IsFolder && foldersWithSubtitles.Contains(e.Id)));
             }
             else
             {
                 baseQuery = baseQuery
                     .Where(e =>
-                        (!e.IsFolder && !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle))
+                        (!e.IsFolder && !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle)
+                            && !versionsWithSubtitles.Contains(e.Id))
                         || (e.IsFolder && !foldersWithSubtitles.Contains(e.Id)));
             }
         }
 
         if (filter.SubtitleLanguages.Count > 0)
         {
-            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, new HasMediaStreamType(MediaStreamTypeEntity.Subtitle, filter.SubtitleLanguages));
+            var criteria = new HasMediaStreamType(MediaStreamTypeEntity.Subtitle, filter.SubtitleLanguages);
+            var versionsWithSubtitles = DescendantQueryHelper.GetPrimaryVersionIdsMatching(context, criteria);
+            var foldersWithSubtitles = DescendantQueryHelper.GetFolderIdsMatching(context, criteria);
             baseQuery = baseQuery
                 .Where(e =>
-                    (!e.IsFolder && e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle
-                     && (filter.SubtitleLanguages.Contains(f.Language) || (filter.SubtitleLanguages.Contains("und") && string.IsNullOrEmpty(f.Language)))))
+                    (!e.IsFolder && (e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle
+                        && (filter.SubtitleLanguages.Contains(f.Language) || (filter.SubtitleLanguages.Contains("und") && string.IsNullOrEmpty(f.Language))))
+                        || versionsWithSubtitles.Contains(e.Id)))
                     || (e.IsFolder && foldersWithSubtitles.Contains(e.Id)));
         }
 
         if (filter.AudioLanguages.Count > 0)
         {
-            var foldersWithAudio = DescendantQueryHelper.GetFolderIdsMatching(context, new HasMediaStreamType(MediaStreamTypeEntity.Audio, filter.AudioLanguages));
+            var criteria = new HasMediaStreamType(MediaStreamTypeEntity.Audio, filter.AudioLanguages);
+            var versionsWithAudio = DescendantQueryHelper.GetPrimaryVersionIdsMatching(context, criteria);
+            var foldersWithAudio = DescendantQueryHelper.GetFolderIdsMatching(context, criteria);
             baseQuery = baseQuery
                 .Where(e =>
-                    (!e.IsFolder && e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Audio
-                     && (filter.AudioLanguages.Contains(f.Language) || (filter.AudioLanguages.Contains("und") && string.IsNullOrEmpty(f.Language)))))
+                    (!e.IsFolder && (e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Audio
+                        && (filter.AudioLanguages.Contains(f.Language) || (filter.AudioLanguages.Contains("und") && string.IsNullOrEmpty(f.Language))))
+                        || versionsWithAudio.Contains(e.Id)))
                     || (e.IsFolder && foldersWithAudio.Contains(e.Id)));
         }
 
         if (filter.HasChapterImages.HasValue)
         {
             var hasChapterImages = filter.HasChapterImages.Value;
-            var foldersWithChapterImages = DescendantQueryHelper.GetFolderIdsMatching(context, new HasChapterImages());
+            var criteria = new HasChapterImages();
+            var versionsWithChapterImages = DescendantQueryHelper.GetPrimaryVersionIdsMatching(context, criteria);
+            var foldersWithChapterImages = DescendantQueryHelper.GetFolderIdsMatching(context, criteria);
             if (hasChapterImages)
             {
                 baseQuery = baseQuery
                     .Where(e =>
-                        (!e.IsFolder && e.Chapters!.Any(f => f.ImagePath != null))
+                        (!e.IsFolder && (e.Chapters!.Any(f => f.ImagePath != null)
+                            || versionsWithChapterImages.Contains(e.Id)))
                         || (e.IsFolder && foldersWithChapterImages.Contains(e.Id)));
             }
             else
             {
                 baseQuery = baseQuery
                     .Where(e =>
-                        (!e.IsFolder && !e.Chapters!.Any(f => f.ImagePath != null))
+                        (!e.IsFolder && !e.Chapters!.Any(f => f.ImagePath != null)
+                            && !versionsWithChapterImages.Contains(e.Id))
                         || (e.IsFolder && !foldersWithChapterImages.Contains(e.Id)));
             }
         }
@@ -964,17 +1078,6 @@ public sealed partial class BaseItemRepository
             baseQuery = baseQuery.WhereHasAnyProviderIds(filter.HasAnyProviderIds);
         }
 
-        if (filter.HasAnyProviderIds is not null && filter.HasAnyProviderIds.Count > 0)
-        {
-            var includeAny = filter.HasAnyProviderIds
-                .SelectMany(kvp => kvp.Value.Select(v => $"{kvp.Key}:{v}"))
-                .ToArray();
-            if (includeAny.Length > 0)
-            {
-                baseQuery = baseQuery.Where(e => e.Provider!.Select(f => f.ProviderId + ":" + f.ProviderValue)!.Any(f => includeAny.Contains(f)));
-            }
-        }
-
         if (filter.HasImdbId.HasValue)
         {
             baseQuery = filter.HasImdbId.Value
@@ -996,26 +1099,18 @@ public sealed partial class BaseItemRepository
                 : baseQuery.Where(e => e.Provider!.All(f => f.ProviderId.ToLower() != TvdbProviderName));
         }
 
-        var queryTopParentIds = filter.TopParentIds;
-
-        if (queryTopParentIds.Length > 0)
-        {
-            var includedItemByNameTypes = GetItemByNameTypesInQuery(filter);
-            var enableItemsByName = (filter.IncludeItemsByName ?? false) && includedItemByNameTypes.Count > 0;
-            if (enableItemsByName && includedItemByNameTypes.Count > 0)
-            {
-                baseQuery = baseQuery.Where(e => includedItemByNameTypes.Contains(e.Type) || queryTopParentIds.Any(w => w == e.TopParentId!.Value));
-            }
-            else
-            {
-                baseQuery = baseQuery.WhereOneOrMany(queryTopParentIds, e => e.TopParentId!.Value);
-            }
-        }
+        baseQuery = ApplyTopParentFiltering(context, baseQuery, filter);
 
         if (filter.AncestorIds.Length > 0)
         {
             var ancestorFilter = filter.AncestorIds.OneOrManyExpressionBuilder<AncestorId, Guid>(f => f.ParentItemId);
             baseQuery = baseQuery.Where(e => e.Parents!.AsQueryable().Any(ancestorFilter));
+        }
+
+        if (filter.DescendantOfId.HasValue)
+        {
+            var descendantIds = DescendantQueryHelper.GetAllDescendantIds(context, filter.DescendantOfId.Value);
+            baseQuery = baseQuery.Where(e => descendantIds.Contains(e.Id));
         }
 
         if (filter.LinkedChildAncestorIds.Length > 0)
@@ -1119,16 +1214,23 @@ public sealed partial class BaseItemRepository
                 : baseQuery.WhereNeitherItemNorDescendantMatches(context, isPlaceHolder);
         }
 
+        // An extra is owned by the single version of an item it is named after, so an extra on any
+        // version counts for the item itself
+        IQueryable<Guid> WithPrimaryVersions(IQueryable<Guid> ownerIds)
+            => ownerIds.Concat(context.BaseItems
+                .Where(version => version.PrimaryVersionId != null && ownerIds.Contains(version.Id))
+                .Select(version => version.PrimaryVersionId!.Value));
+
         if (filter.HasSpecialFeature.HasValue)
         {
-            var itemsWithExtras = context.BaseItems
+            var itemsWithExtras = WithPrimaryVersions(context.BaseItems
                 .Where(extra => extra.OwnerId != null
                     && extra.ExtraType != null
                     && extra.ExtraType != BaseItemExtraType.Unknown
                     && extra.ExtraType != BaseItemExtraType.Trailer
                     && extra.ExtraType != BaseItemExtraType.ThemeSong
                     && extra.ExtraType != BaseItemExtraType.ThemeVideo)
-                .Select(extra => extra.OwnerId!.Value)
+                .Select(extra => extra.OwnerId!.Value))
                 .Distinct();
 
             Expression<Func<BaseItemEntity, bool>> hasExtras = e => itemsWithExtras.Contains(e.Id);
@@ -1140,9 +1242,9 @@ public sealed partial class BaseItemRepository
 
         if (filter.HasTrailer.HasValue)
         {
-            var trailerOwnerIds = context.BaseItems
+            var trailerOwnerIds = WithPrimaryVersions(context.BaseItems
                 .Where(extra => extra.ExtraType == BaseItemExtraType.Trailer && extra.OwnerId != null)
-                .Select(extra => extra.OwnerId!.Value);
+                .Select(extra => extra.OwnerId!.Value));
 
             Expression<Func<BaseItemEntity, bool>> hasTrailer = e => trailerOwnerIds.Contains(e.Id);
 
@@ -1153,9 +1255,9 @@ public sealed partial class BaseItemRepository
 
         if (filter.HasThemeSong.HasValue)
         {
-            var themeSongOwnerIds = context.BaseItems
+            var themeSongOwnerIds = WithPrimaryVersions(context.BaseItems
                 .Where(extra => extra.ExtraType == BaseItemExtraType.ThemeSong && extra.OwnerId != null)
-                .Select(extra => extra.OwnerId!.Value);
+                .Select(extra => extra.OwnerId!.Value));
 
             Expression<Func<BaseItemEntity, bool>> hasThemeSong = e => themeSongOwnerIds.Contains(e.Id);
 
@@ -1166,9 +1268,9 @@ public sealed partial class BaseItemRepository
 
         if (filter.HasThemeVideo.HasValue)
         {
-            var themeVideoOwnerIds = context.BaseItems
+            var themeVideoOwnerIds = WithPrimaryVersions(context.BaseItems
                 .Where(extra => extra.ExtraType == BaseItemExtraType.ThemeVideo && extra.OwnerId != null)
-                .Select(extra => extra.OwnerId!.Value);
+                .Select(extra => extra.OwnerId!.Value));
 
             Expression<Func<BaseItemEntity, bool>> hasThemeVideo = e => themeVideoOwnerIds.Contains(e.Id);
 
@@ -1192,33 +1294,6 @@ public sealed partial class BaseItemRepository
                     || (e.Data != null && (
                         e.Data.Contains("\"AirsAfterSeasonNumber\":" + seasonStr)
                         || e.Data.Contains("\"AirsBeforeSeasonNumber\":" + seasonStr))));
-            }
-        }
-
-        if (filter.AdjacentTo.HasValue && !filter.AdjacentTo.Value.IsEmpty())
-        {
-            var adjacentToId = filter.AdjacentTo.Value;
-            var targetItem = context.BaseItems.Where(e => e.Id == adjacentToId).Select(e => new { e.SortName, e.Id }).FirstOrDefault();
-            if (targetItem is not null)
-            {
-                var targetSortName = targetItem.SortName ?? string.Empty;
-
-                // Fetch both prev and next adjacent items in a single query using Concat (UNION ALL).
-                var adjacentIds = context.BaseItems
-                    .Where(e => string.Compare(e.SortName, targetSortName) < 0)
-                    .OrderByDescending(e => e.SortName)
-                    .Select(e => e.Id)
-                    .Take(1)
-                    .Concat(
-                        context.BaseItems
-                            .Where(e => string.Compare(e.SortName, targetSortName) > 0)
-                            .OrderBy(e => e.SortName)
-                            .Select(e => e.Id)
-                            .Take(1))
-                    .ToList();
-
-                adjacentIds.Add(adjacentToId);
-                baseQuery = baseQuery.Where(e => adjacentIds.Contains(e.Id));
             }
         }
 
