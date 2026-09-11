@@ -33,7 +33,8 @@ public class PeopleRepository(IDbContextFactory<JellyfinDbContext> dbProvider, I
     public QueryResult<PersonInfo> GetPeople(InternalPeopleQuery filter)
     {
         using var context = _dbProvider.CreateDbContext();
-        var dbQuery = TranslateQuery(context.Peoples.AsNoTracking(), context, filter);
+        var dbQuery = TranslateQuery(context.Peoples.AsNoTracking(), context, filter)
+            .Where(person => context.PeopleBaseItemMap.Any(mapping => mapping.PeopleId == person.Id));
         int? distinctNameCount = null;
 
         // Include PeopleBaseItemMap

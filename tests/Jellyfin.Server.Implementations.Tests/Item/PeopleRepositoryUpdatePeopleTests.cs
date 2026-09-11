@@ -197,6 +197,79 @@ public sealed class PeopleRepositoryUpdatePeopleTests : SqliteDbTestFixture
         Assert.Single(after.Peoples);
     }
 
+    [Fact]
+    public void GetPeople_UnmappedOriginalNameIsExcludedBeforePaging()
+    {
+        _repository.UpdatePeople(_itemId, [CreatePerson("황정민", PersonKind.Actor, "Hero")]);
+        using (var context = CreateDbContext())
+        {
+            context.PeopleBaseItemMap.RemoveRange(context.PeopleBaseItemMap);
+            context.SaveChanges();
+        }
+
+        _repository.UpdatePeople(_itemId, [
+            CreatePerson("황정민 (남자)", PersonKind.Actor, "Hero"),
+            CreatePerson("황정민 (여자)", PersonKind.Actor, "Other")
+        ]);
+
+        var result = _repository.GetPeople(new InternalPeopleQuery
+        {
+            NameContains = "황정민",
+            EnableTotalRecordCount = true,
+            StartIndex = 0,
+            Limit = 1
+        });
+        var nextPage = _repository.GetPeople(new InternalPeopleQuery
+        {
+            NameContains = "황정민",
+            EnableTotalRecordCount = true,
+            StartIndex = 1,
+            Limit = 1
+        });
+
+        Assert.Equal(2, result.TotalRecordCount);
+        Assert.Equal("황정민 (남자)", Assert.Single(result.Items).Name);
+        Assert.Equal(2, nextPage.TotalRecordCount);
+        Assert.Equal("황정민 (여자)", Assert.Single(nextPage.Items).Name);
+        using var after = CreateDbContext();
+        Assert.Equal(3, after.Peoples.Count());
+    }
+
+    [Fact]
+    public void GetPeople_OriginalNameStillCreditedOnAnItemIsKept()
+    {
+        _repository.UpdatePeople(_itemId, [CreatePerson("황정민", PersonKind.Actor, "Hero")]);
+        _repository.UpdatePeople(AddMovie("Refreshed Movie"), [
+            CreatePerson("황정민 (남자)", PersonKind.Actor, "Hero"),
+            CreatePerson("황정민 (여자)", PersonKind.Actor, "Other")
+        ]);
+
+        var result = _repository.GetPeople(new InternalPeopleQuery
+        {
+            NameContains = "황정민",
+            EnableTotalRecordCount = true
+        });
+
+        Assert.Equal(3, result.TotalRecordCount);
+        Assert.Contains(result.Items, person => person.Name == "황정민");
+    }
+
+    [Fact]
+    public void GetPeople_OnlyUnmappedCreditsReturnsEmptyResults()
+    {
+        _repository.UpdatePeople(_itemId, [CreatePerson("Original Name", PersonKind.Actor, "Hero")]);
+        using (var context = CreateDbContext())
+        {
+            context.PeopleBaseItemMap.RemoveRange(context.PeopleBaseItemMap);
+            context.SaveChanges();
+        }
+
+        var result = _repository.GetPeople(new InternalPeopleQuery { EnableTotalRecordCount = true });
+
+        Assert.Equal(0, result.TotalRecordCount);
+        Assert.Empty(result.Items);
+    }
+
     private Guid AddMovie(string name)
     {
         var id = Guid.NewGuid();
