@@ -5,7 +5,11 @@ using System.Threading.Tasks;
 using Jellyfin.Api.Controllers;
 using Jellyfin.Api.Models;
 using MediaBrowser.Common.Api;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.IO;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -18,6 +22,8 @@ public sealed class TmdbPersonAliasesControllerTests
 {
     private readonly Mock<ITmdbPersonAliasService> _aliases = new();
     private readonly Mock<ITmdbPersonSearchService> _people = new();
+    private readonly Mock<ILibraryManager> _library = new();
+    private readonly Mock<IProviderManager> _providers = new();
 
     public TmdbPersonAliasesControllerTests()
     {
@@ -108,7 +114,86 @@ public sealed class TmdbPersonAliasesControllerTests
         _people.Verify(people => people.Search("정유미", 2, It.IsAny<CancellationToken>()), Times.Once);
     }
 
-    private TmdbPersonAliasesController CreateController() => new(_aliases.Object, _people.Object)
+    [Fact]
+    public void RefreshItems_QueuesEachMatchingWorkOnceWithFullReplacement()
+    {
+        var first = new Movie { Id = Guid.NewGuid() };
+        var second = new Movie { Id = Guid.NewGuid() };
+        _library.Setup(library => library.GetItemList(It.Is<InternalItemsQuery>(query => query.Person == "Original Name" && query.Recursive == true)))
+            .Returns(new BaseItem[] { first, second });
+        _library.Setup(library => library.GetItemList(It.Is<InternalItemsQuery>(query => query.Person == "Previous Alias" && query.Recursive == true)))
+            .Returns(new BaseItem[] { first });
+
+        var result = CreateController().RefreshItems([" Original Name ", "Original Name", "Previous Alias"]);
+
+        Assert.Equal(2, Assert.IsAssignableFrom<OkObjectResult>(result.Result).Value);
+        foreach (var item in new[] { first, second })
+        {
+            _providers.Verify(
+                providers => providers.QueueRefresh(
+                    item.Id,
+                    It.Is<MetadataRefreshOptions>(options =>
+                        options.MetadataRefreshMode == MetadataRefreshMode.FullRefresh
+                        && options.ImageRefreshMode == MetadataRefreshMode.FullRefresh
+                        && options.ReplaceAllMetadata && options.ReplaceAllImages
+                        && options.RemoveOldMetadata && options.ForceSave
+                        && !options.IsAutomated && !options.RegenerateTrickplay),
+                    RefreshPriority.High),
+                Times.Once);
+        }
+
+        _library.Verify(library => library.GetItemList(It.Is<InternalItemsQuery>(query => query.Person == "Original Name")), Times.Once);
+        _providers.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public void RefreshItems_NoMatchingWorksQueuesNothing()
+    {
+        _library.Setup(library => library.GetItemList(It.IsAny<InternalItemsQuery>())).Returns(Array.Empty<BaseItem>());
+
+        var result = CreateController().RefreshItems(["Original Name"]);
+
+        Assert.Equal(0, Assert.IsAssignableFrom<OkObjectResult>(result.Result).Value);
+        _providers.VerifyNoOtherCalls();
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("Invalid\nName")]
+    public void RefreshItems_InvalidNameDoesNotRefreshEntireLibrary(string name)
+    {
+        var result = CreateController().RefreshItems(["Valid Name", name]);
+
+        Assert.IsType<BadRequestResult>(result.Result);
+        _library.VerifyNoOtherCalls();
+        _providers.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public void RefreshItems_EmptyNamesDoesNotRefreshEntireLibrary()
+    {
+        var result = CreateController().RefreshItems([]);
+
+        Assert.IsType<BadRequestResult>(result.Result);
+        _library.VerifyNoOtherCalls();
+        _providers.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public void RefreshItems_CollectsAllTargetsBeforeQueueing()
+    {
+        _library.Setup(library => library.GetItemList(It.Is<InternalItemsQuery>(query => query.Person == "First")))
+            .Returns(new BaseItem[] { new Movie { Id = Guid.NewGuid() } });
+        _library.Setup(library => library.GetItemList(It.Is<InternalItemsQuery>(query => query.Person == "Second")))
+            .Throws(new InvalidOperationException("Query failed"));
+
+        Assert.Throws<InvalidOperationException>(() => CreateController().RefreshItems(["First", "Second"]));
+
+        _providers.VerifyNoOtherCalls();
+    }
+
+    private TmdbPersonAliasesController CreateController() => new(_aliases.Object, _people.Object, _library.Object, _providers.Object, Mock.Of<IFileSystem>())
     {
         ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
     };

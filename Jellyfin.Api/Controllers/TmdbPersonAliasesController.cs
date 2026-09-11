@@ -8,7 +8,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Models;
 using MediaBrowser.Common.Api;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.IO;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -23,16 +26,30 @@ public class TmdbPersonAliasesController : BaseJellyfinApiController
 {
     private readonly ITmdbPersonAliasService _aliases;
     private readonly ITmdbPersonSearchService _people;
+    private readonly ILibraryManager _libraryManager;
+    private readonly IProviderManager _providerManager;
+    private readonly IFileSystem _fileSystem;
 
     /// <summary>
     /// 별칭 API를 초기화한다.
     /// </summary>
     /// <param name="aliases">메인 DB와 분리된 별칭 저장소.</param>
     /// <param name="people">실제 TMDB 인물 검색 및 상세 조회 서비스.</param>
-    public TmdbPersonAliasesController(ITmdbPersonAliasService aliases, ITmdbPersonSearchService people)
+    /// <param name="libraryManager">기존 출연진 이름으로 작품을 조회할 관리자.</param>
+    /// <param name="providerManager">메타데이터 갱신 대기열 관리자.</param>
+    /// <param name="fileSystem">갱신 작업의 파일 시스템.</param>
+    public TmdbPersonAliasesController(
+        ITmdbPersonAliasService aliases,
+        ITmdbPersonSearchService people,
+        ILibraryManager libraryManager,
+        IProviderManager providerManager,
+        IFileSystem fileSystem)
     {
         _aliases = aliases;
         _people = people;
+        _libraryManager = libraryManager;
+        _providerManager = providerManager;
+        _fileSystem = fileSystem;
     }
 
     /// <summary>
@@ -150,6 +167,55 @@ public class TmdbPersonAliasesController : BaseJellyfinApiController
         {
             return Problem(statusCode: StatusCodes.Status502BadGateway, detail: "TMDB 인물 확인에 실패하여 저장하지 않았습니다. 잠시 후 다시 시도하세요.");
         }
+    }
+
+    /// <summary>
+    /// 별칭 저장 완료 후 기존 출연진 이름으로 연결된 작품의 전체 갱신을 예약한다.
+    /// </summary>
+    /// <param name="names">검색어, 원래 인물명 및 변경 전 별칭. 모든 별칭 저장 후 호출한다.</param>
+    /// <returns>중복을 제외하고 갱신 대기열에 추가한 작품 수. 실제 갱신은 비동기로 진행된다.</returns>
+    [HttpPost("RefreshItems")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public ActionResult<int> RefreshItems([FromBody, Required, MinLength(1), MaxLength(1000)] string[] names)
+    {
+        if (names.Length == 0 || names.Length > 1000
+            || names.Any(name => string.IsNullOrWhiteSpace(name) || name.Length > 200 || name.Any(char.IsControl)))
+        {
+            return BadRequest();
+        }
+
+        var itemIds = new HashSet<Guid>();
+        foreach (var name in names.Select(name => name.Trim()).Distinct(StringComparer.Ordinal))
+        {
+            var items = _libraryManager.GetItemList(new InternalItemsQuery
+            {
+                Person = name,
+                Recursive = true
+            });
+            foreach (var item in items)
+            {
+                itemIds.Add(item.Id);
+            }
+        }
+
+        foreach (var itemId in itemIds)
+        {
+            var options = new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+            {
+                MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                ReplaceAllMetadata = true,
+                ReplaceAllImages = true,
+                RemoveOldMetadata = true,
+                ForceSave = true,
+                IsAutomated = false,
+                RegenerateTrickplay = false
+            };
+            _providerManager.QueueRefresh(itemId, options, RefreshPriority.High);
+        }
+
+        return Ok(itemIds.Count);
     }
 
     /// <summary>
