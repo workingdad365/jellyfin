@@ -3820,6 +3820,11 @@ namespace MediaBrowser.Controller.MediaEncoding
             var formatArg = isFormatFixed ? (":format=" + videoFormat) : string.Empty;
             var tonemapArg = string.Empty;
 
+            // libplacebo only support full range RGB
+            forceFullRange = forceFullRange
+                || (videoFormat ?? string.Empty).Contains("rgb", StringComparison.OrdinalIgnoreCase)
+                || (videoFormat ?? string.Empty).Contains("bgr", StringComparison.OrdinalIgnoreCase);
+
             if (doTonemap)
             {
                 var algorithm = options.TonemappingAlgorithm;
@@ -3842,6 +3847,10 @@ namespace MediaBrowser.Controller.MediaEncoding
                 {
                     tonemapArg += ":range=" + range.ToString().ToLowerInvariant();
                 }
+            }
+            else if (forceFullRange)
+            {
+                formatArg += ":range=pc";
             }
 
             return string.Format(
@@ -5483,7 +5492,14 @@ namespace MediaBrowser.Controller.MediaEncoding
                 mainFilters.Add("format=vaapi");
 
                 // clear the surf->meta_offset and output nv12
-                mainFilters.Add("scale_vaapi=format=nv12");
+                var hwCscFilter = "scale_vaapi=format=nv12";
+
+                if (!isMjpegEncoder && options.TonemappingRange != TonemappingRange.pc)
+                {
+                    hwCscFilter += ":out_range=tv";
+                }
+
+                mainFilters.Add(hwCscFilter);
 
                 // hw deint
                 if (doDeintH2645)
@@ -5553,7 +5569,14 @@ namespace MediaBrowser.Controller.MediaEncoding
                     overlayFilters.Add("format=vaapi");
 
                     // clear the surf->meta_offset and output nv12
-                    overlayFilters.Add("scale_vaapi=format=nv12");
+                    var hwCscFilter = "scale_vaapi=format=nv12";
+
+                    if (!doVkTonemap || (doVkTonemap && options.TonemappingRange != TonemappingRange.pc))
+                    {
+                        hwCscFilter += ":out_range=tv";
+                    }
+
+                    overlayFilters.Add(hwCscFilter);
 
                     // hw deint
                     if (doDeintH2645)
