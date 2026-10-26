@@ -61,9 +61,6 @@ public class BaseItemConfiguration : IEntityTypeConfiguration<BaseItemEntity>
         builder.HasIndex(e => new { e.TopParentId, e.Type, e.IsVirtualItem, e.DateCreated });
         builder.HasIndex(e => new { e.TopParentId, e.IsFolder, e.IsVirtualItem, e.DateCreated });
         builder.HasIndex(e => new { e.TopParentId, e.MediaType, e.IsVirtualItem, e.DateCreated });
-        // TV Show performance optimization - DateCreated DESC with SortName
-        builder.HasIndex(e => new { e.Type, e.TopParentId, e.IsVirtualItem, e.DateCreated, e.SortName })
-            .HasDatabaseName("IX_BaseItems_TVShow_DateCreated_Performance");
         // resume
         builder.HasIndex(e => new { e.MediaType, e.TopParentId, e.IsVirtualItem, e.PresentationUniqueKey });
         // alternate versions of an item, e.g. resolving the played date of a version onto its primary.

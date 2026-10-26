@@ -149,14 +149,12 @@
 - DB 제공자에 `OptimizeDatabasePerformance`를 추가하고 서버 시작 시 호출하도록 연결했다.
 - 예약 최적화에서도 성능 PRAGMA 적용 경로를 사용한다. 개별 PRAGMA 실패는 경고 로그로 남긴다.
 - 설정값은 `page_size=4096`, `cache_size=20000`, `locking_mode=EXCLUSIVE`, `synchronous=NORMAL`, `temp_store=MEMORY`, `mmap_size=30000000000`이다.
-- 미디어 항목 모델에 `Type`, `TopParentId`, `IsVirtualItem`, `DateCreated`, `SortName` 복합 인덱스 정의를 추가했다. 이름은 `IX_BaseItems_TVShow_DateCreated_Performance`다.
-- 코드에 설정·인덱스 정의가 추가된 사실과 운영 DB에서의 실제 적용·성능 향상 여부는 별개다. PRAGMA는 연결 및 기존 DB 상태에 영향을 받으며, 이번 문서 작성에서 운영 DB 상태나 성능을 측정하지 않았다.
+- PRAGMA는 연결 및 기존 DB 상태에 영향을 받으며, 설정만으로 성능 향상을 보장하지 않는다.
 
 관련 파일:
 
 - [Jellyfin.Server/Program.cs](Jellyfin.Server/Program.cs)
 - [src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/SqliteDatabaseProvider.cs](src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/SqliteDatabaseProvider.cs)
-- [src/Jellyfin.Database/Jellyfin.Database.Implementations/ModelConfiguration/BaseItemConfiguration.cs](src/Jellyfin.Database/Jellyfin.Database.Implementations/ModelConfiguration/BaseItemConfiguration.cs)
 
 ## 8. 유지보수 도구와 개발 환경
 
